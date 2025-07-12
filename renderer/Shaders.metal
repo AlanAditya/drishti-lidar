@@ -269,13 +269,13 @@ kernel void ChromaKeyCompute(device uint8_t* A [[buffer(0)]], constant simd_pack
     }
 }
 
-kernel void AddGPU_F(device const float* A [[buffer(0)]], device const float* B [[buffer(1)]], device float* C [[buffer(2)]],uint gid [[thread_position_in_grid]]) {
-    C[gid] = A[gid] + B[gid];
-}
-
-kernel void AddGPU_I(device const int* A [[buffer(0)]], device const int* B [[buffer(1)]], device int* C [[buffer(2)]],uint gid [[thread_position_in_grid]]) {
-    C[gid] = A[gid] + B[gid];
-}
+//kernel void AddGPU_F(device const float* A [[buffer(0)]], device const float* B [[buffer(1)]], device float* C [[buffer(2)]],uint gid [[thread_position_in_grid]]) {
+//    C[gid] = A[gid] + B[gid];
+//}
+//
+//kernel void AddGPU_I(device const int* A [[buffer(0)]], device const int* B [[buffer(1)]], device int* C [[buffer(2)]],uint gid [[thread_position_in_grid]]) {
+//    C[gid] = A[gid] + B[gid];
+//}
 
 kernel void AddGPU_C(device const uint8_t* A [[buffer(0)]], device const uint8_t* B [[buffer(1)]], device uint8_t* C [[buffer(2)]],uint gid [[thread_position_in_grid]]){
     C[4* gid + 0] = clamp((int)(A[4* gid + 0]) + (int)(B[4* gid + 0]), 0, 255);
@@ -327,82 +327,91 @@ kernel void MulGPU_All(device const void* A [[buffer(0)]], device const void* B 
 }
 
 
-kernel void ConversionGPU_All(device const void* A [[buffer(0)]], device const void* B [[buffer(1)]], constant int& type [[buffer(2)]], constant int& from [[buffer(2)]] ,uint gid [[thread_position_in_grid]]){
-//    switch (type) {
-//        case 0: { // image to float
-//            auto a = (device float*)A;
-//            auto b = (device uint8_t*)B;
-//            a[gid] = (float)(b[gid]);
-//            break;
-//        }
-//        case 1: { // float to image
-//            auto a = (device uint8_t*)A;
-//            auto b = (device float*)B;
-//            a[gid] = b[gid];
-//            break;
-//        }
-//        case 2: { // int to float
-//            auto a = (device float*)A;
-//            auto b = (device int*)B;
-//            a[gid] = b[gid];
-//        }
-//        case 3: { // int16 to int8
-//            auto a = (device uint8_t*)A;
-//            auto b = (device int16_t*)B;
-//            a[gid] = b[gid];
-//        }
-//    }
-    
-    switch (from) {
+
+
+kernel void ConversionGPU_All(device const void* A [[buffer(0)]], device const void*B [[buffer(1)]], constant int& type [[buffer(2)]], constant int& from [[buffer(3)]] ,uint gid [[thread_position_in_grid]]){
+    switch (type) {
         case 0: { // image to float
             auto a = (device float*)A;
             auto b = (device uint8_t*)B;
-                a[gid] = (float)(b[gid]);
-                break;
-            }
-            case 1: { // float to image
-                auto a = (device uint8_t*)A;
-                auto b = (device float*)B;
-                a[gid] = b[gid];
-                break;
-            }
-            case 2: { // int to float
-                auto a = (device float*)A;
-                auto b = (device int*)B;
-                a[gid] = b[gid];
-            }
-            case 3: { // int16 to int8
-                auto a = (device uint8_t*)A;
-                auto b = (device int16_t*)B;
-                a[gid] = b[gid];
-            }
+            a[gid] = (float)(b[gid]);
+            break;
         }
+        case 1: { // float to image
+            auto a = (device uint8_t*)A;
+            auto b = (device float*)B;
+            a[gid] = b[gid];
+            break;
+        }
+        case 2: { // int to float
+            auto a = (device float*)A;
+            auto b = (device int*)B;
+            a[gid] = b[gid];
+        }
+        case 3: { // int16 to int8
+            auto a = (device uint8_t*)A;
+            auto b = (device int16_t*)B;
+            a[gid] = b[gid];
+        }
+    }
     
-        switch (type) {
-            case 0: { // image to float
-                auto a = (device float*)A;
-                auto b = (device uint8_t*)B;
-                a[gid] = (float)(b[gid]);
-                break;
-            }
-            case 1: { // float to image
-                auto a = (device uint8_t*)A;
-                auto b = (device float*)B;
-                a[gid] = b[gid];
-                break;
-            }
-            case 2: { // int to float
-                auto a = (device float*)A;
-                auto b = (device int*)B;
-                a[gid] = b[gid];
-            }
-            case 3: { // int16 to int8
-                auto a = (device uint8_t*)A;
-                auto b = (device int16_t*)B;
-                a[gid] = b[gid];
-            }
-        }
+//    switch (from) {
+//        case 0:  // from float
+//            auto a = (device float*)A;
+//            break;
+//        case 1:  // image
+//            auto a = (device uint8_t*)A;
+//            break;
+//        case 2:  // int
+//            auto a = (device int*)A;
+//            break;
+//        case 3:  // int16 to int8
+//            auto a = (device uint16_t*)A;
+//            break;
+//        case 4:  // simd_float2
+//            auto a = (device simd_float2*)A;
+//            break;
+//        case 5:  // simd_float3
+//            auto a = (device simd_float3*)A;
+//            break;
+//        case 6:  // simd_float3
+//            auto a = (device simd_float4*)A;
+//            break;
+//    }
+//    
+//    switch (type) {
+//        case 0:  // from float
+//            auto b = (device float*)B;
+//            b[gid] = (float)(a[gid]);
+//            break;
+//        case 1:  // image
+//            auto b = (device uint8_t*)B;
+//            b[gid] = (uint8_t)(a[gid]);
+//            break;
+//        case 2:  // int
+//            auto b = (device int*)B;
+//            b[gid] = (int)(a[gid]);
+//            break;
+//        case 3:  // int16
+//            auto b = (device uint16_t*)B;
+//            b[gid] = (int16)(a[gid]);
+//            break;
+//        case 4:  // int16 to int8
+//            auto b = (device simd_float2*)B;
+//            b[gid] = (simd_float2)(a[gid]);
+//            break;
+//        case 5:  // int16 to int8
+//            auto b = (device simd_float3*)B;
+//            b[gid] = (simd_float3)(a[gid]);
+//            break;
+//        case 6:  // int16 to int8
+//            auto b = (device simd_float4*)B;
+//            b[gid] = (simd_float4)(a[gid]);
+//            break;
+//    }
 }
+
+
 
 kernel void DerivativeGPU_All(device const void* A [[buffer(0)]], device const void* B [[buffer(1)]], constant size_t& stride [[buffer(2)]], constant size_t& max [[buffer(3)]],constant int& lastResolve [[buffer(4)]] , constant int& type [[buffer(5)]] ,uint gid [[thread_position_in_grid]]){
     switch (type) {
