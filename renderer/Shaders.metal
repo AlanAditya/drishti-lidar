@@ -55,6 +55,8 @@ constant float2 textCoords[4] = {{0, 0}, {0, 1}, {1, 0}, {1, 1}};
 constant float gridSize = 0.05f;
 constant float lineWidth = 0.001f;
 constant float4 Thickcolour = {1, 1, 1, 1};
+constant float3 xAxisColor = float3(1.0, 0.3, 0.3); // Red for X axis
+constant float3 zAxisColor = float3(0.3, 0.3, 1.0); // Blue for Z axis
 
 template<typename T, typename U>
 constexpr T mod(T x, U y) { return x - y * floor( x / y ); }
@@ -111,6 +113,10 @@ fragment float4 InfiniteGridFragmentShader(InfiniteGridColorInOut in [[stage_in]
 //    auto color = float4(mod(in.worldSpacePosition.x, gridSize), mod(in.worldSpacePosition.y, gridSize), 0, 1);
 //    auto color = float4(1, 1, 1, mod(in.worldSpacePosition.x, gridSize) * mod(in.worldSpacePosition.y, gridSize));
 //    auto color = float4(1, 1, 1, diracBelta( mod(in.worldSpacePosition.x, gridSize) ) | diracBelta( mod(in.worldSpacePosition.y, gridSize) ));
+    float zAxis = abs(in.worldSpacePosition.y) < 0.01 ? 1.0 : 0.0;
+    float xAxis = abs(in.worldSpacePosition.x) < 0.01 ? 1.0 : 0.0;
+    
+
     
     float2 dz_dxy = {dfdx(in.worldSpacePosition.y), dfdy(in.worldSpacePosition.y)};
     float2 dx_dxy = {dfdx(in.worldSpacePosition.x), dfdy(in.worldSpacePosition.x)};
@@ -120,6 +126,14 @@ fragment float4 InfiniteGridFragmentShader(InfiniteGridColorInOut in [[stage_in]
     float loda = max((1 - abs(saturate(change * 2 - 1))));
     float4 col = Thickcolour;
     col.a *= loda;
+    if (col.a < 0.01) discard_fragment();
+    
+    if (xAxis > 0.0) {
+        col = float4(xAxisColor, 1.0);
+    }
+//    if (zAxis > 0.0) {
+//        col = float4(zAxisColor, 1.0);
+//    }
     return col;
 }
 
@@ -145,6 +159,7 @@ struct MeshPointCloudVertexOut {
 
 struct vertexOutLighting {
     float4 position [[position]];
+    float3 WorldPos;
     float3 normal;
     float4 color;
     float2 textCoord;
@@ -176,6 +191,111 @@ vertex vertexOut instanceVertexShader(Vertex3D vertexElement [[stage_in]], const
     return vertOut;
 }
 
+//vertex vertexOut NodeVertexShader(Vertex3D vertexElement [[stage_in]], constant float4x4& modalTransform [[buffer(1)]], constant float4x4& globalTransform [[buffer(2)]], constant float4x4& cam [[buffer(3)]], device const float4x4* instanceData [[buffer(4)]], uint instanceId [[instance_id]]) {
+//    vertexOut vertOut = vertexOut();
+//    vertOut.color = vertexElement.colour;
+//    vertOut.position = cam * globalTransform * instanceData[instanceId] * modalTransform * float4(vertexElement.position, 1.0);
+//    return vertOut;
+//}
+
+vertex vertexOutLighting NodeVertexShader(Vertex3D vertexElement [[stage_in]], constant float4x4& modalTransform [[buffer(1)]], constant float4x4& cam [[buffer(2)]], device const float4x4* instanceData [[buffer(3)]], uint instanceId [[instance_id]]) {
+    vertexOutLighting vertOut = vertexOutLighting();
+    vertOut.color = vertexElement.colour;
+//    vertOut.position = cam * instanceData[instanceId] * modalTransform * float4(vertexElement.position, 1.0);
+    vertOut.position = cam * instanceData[instanceId] * float4(vertexElement.position, 1.0);
+    float3x3 camNorm = float3x3(
+                            cam.columns[0].xyz, // First column without the 4th element
+                            cam.columns[1].xyz, // Second column without the 4th element
+                            cam.columns[2].xyz  // Third column without the 4th element
+                                             );
+    vertOut.normal =  camNorm * vertexElement.normal;
+    vertOut.WorldPos = vertOut.position.xyz / vertOut.position.w;
+    vertOut.textCoord = vertexElement.textCoord;
+    float3 light = {0, 0, -1000};
+//    vertOut.textCoord[0] = dot(vertexElement.normal, normalize(vertexElement.position - cam.columns[3].xyz));
+    return vertOut;
+}
+
+vertex vertexOutLighting BillboardNodeVertexShader(Vertex3D vertexElement [[stage_in]], constant float4x4& modalTransform [[buffer(1)]], constant float4x4& cam [[buffer(2)]], device const float4x4* instanceData [[buffer(3)]], constant float3& cameraPos [[buffer(4)]], uint instanceId [[instance_id]]) {
+    vertexOutLighting vertOut;
+        vertOut.color = vertexElement.colour;
+        vertOut.textCoord = vertexElement.textCoord;
+
+        // 1. Get Instance Properties
+        // We assume Column 3 is Position and Column 1 (Y-axis) is the Arrow/Spine Direction
+        float4x4 instanceMat = instanceData[instanceId];
+        float3 worldOrigin = instanceMat.columns[3].xyz;
+        float3 spineDir = normalize(instanceMat.columns[1].xyz);
+        
+        // Scale extraction (optional, if your matrix has scaling)
+        float lengthScale = length(instanceMat.columns[1].xyz);
+        float widthScale  = length(instanceMat.columns[0].xyz);
+
+        // 2. Calculate Billboarding Vectors
+        float3 viewVec = normalize(cameraPos - worldOrigin);
+        
+        // Compute the 'Right' vector: Perpendicular to both Spine and View
+        // This forces the arrow's width to always face the camera
+        float3 billboardRight = cross(spineDir, viewVec);
+        
+        // Safety check: if looking directly down the spine, use a fallback
+        if (length_squared(billboardRight) < 0.001) {
+            billboardRight = cross(spineDir, float3(1, 0, 0));
+        }
+        billboardRight = normalize(billboardRight);
+        
+        // Compute the 'Normal' vector: Perpendicular to Spine and Right
+        // This points out of the flat face of the arrow
+        float3 billboardNormal = cross(billboardRight, spineDir);
+
+        // 3. Construct the New World Position
+        // We manually assemble the vertex position using our new basis vectors.
+        // X controls width (along billboardRight)
+        // Y controls length (along spineDir)
+        float3 finalWorldPos = worldOrigin
+                               + (spineDir * vertexElement.position.y * lengthScale)
+                               + (billboardRight * vertexElement.position.x * widthScale);
+
+        // 4. Output
+        vertOut.position = cam * float4(finalWorldPos, 1.0);
+        vertOut.WorldPos = finalWorldPos;
+        
+        // For the normal, we usually want it to point at the camera for a billboard
+        // or use the computed billboardNormal.
+        vertOut.normal = billboardNormal;
+
+        return vertOut;
+}
+
+
+vertex pointCloudVertexOut pointCloudNodeVertexShader(Point3D pointElement [[stage_in]], constant float4x4& transform [[buffer(1)]],  constant float4x4& cam [[buffer(2)]], device const float4x4* instanceData [[buffer(3)]], uint instanceId [[instance_id]]) {
+    pointCloudVertexOut vertOut = pointCloudVertexOut();
+    vertOut.color = pointElement.colour;
+    vertOut.pointSize = 7;
+    vertOut.position = cam * instanceData[instanceId] * transform * float4(pointElement.position, 1.0);
+    
+    return vertOut;
+}
+
+vertex vertexOutLighting CustomShader1(Vertex3D vertexElement [[stage_in]], constant float4x4& modalTransform [[buffer(1)]], constant float4x4& cam [[buffer(2)]], device const float4x4* instanceData [[buffer(3)]], device const float4* colourbuff [[buffer(4)]], uint instanceId [[instance_id]]) {
+    vertexOutLighting vertOut = vertexOutLighting();
+    vertOut.color = colourbuff[instanceId];
+//    vertOut.position = cam * instanceData[instanceId] * modalTransform * float4(vertexElement.position, 1.0);
+    vertOut.position = cam * instanceData[instanceId] * float4(vertexElement.position, 1.0);
+    float3x3 camNorm = float3x3(
+                            cam.columns[0].xyz, // First column without the 4th element
+                            cam.columns[1].xyz, // Second column without the 4th element
+                            cam.columns[2].xyz  // Third column without the 4th element
+                                             );
+    vertOut.normal =  camNorm * vertexElement.normal;
+    vertOut.WorldPos = vertOut.position.xyz / vertOut.position.w;
+    vertOut.textCoord = vertexElement.textCoord;
+    float3 light = {0, 0, -1000};
+//    vertOut.textCoord[0] = dot(vertexElement.normal, normalize(vertexElement.position - cam.columns[3].xyz));
+    return vertOut;
+}
+
+
 vertex pointCloudVertexOut pointCloudVertexShader(Point3D pointElement [[stage_in]], constant float4x4& transform [[buffer(1)]],  constant float4x4& cam [[buffer(2)]]) {
     pointCloudVertexOut vertOut = pointCloudVertexOut();
     vertOut.color = pointElement.colour;
@@ -184,6 +304,8 @@ vertex pointCloudVertexOut pointCloudVertexShader(Point3D pointElement [[stage_i
     
     return vertOut;
 }
+
+
 
 vertex MeshPointCloudVertexOut MeshPointCloudVertexShader(Vertex3D pointElement [[stage_in]], constant float4x4& transform [[buffer(1)]],  constant float4x4& cam [[buffer(2)]]) {
     MeshPointCloudVertexOut vertOut = MeshPointCloudVertexOut();
@@ -226,7 +348,9 @@ vertex vertexOutLighting lightingVertexShader(Vertex3D vertexElement [[stage_in]
     vertOut.textCoord = vertexElement.textCoord;
     return vertOut;
 }
-
+float reLU(float x) {
+    return x>0 ? x : 0;
+}
 fragment float4 lightingFragmentShader(vertexOutLighting inColor  [[ stage_in ]], constant bool& isTextured [[buffer(0)]], texture2d<float, access::sample> textureIn [[ texture(0) ]])
 {
     float3 light = {0, 0, -1000};
@@ -235,7 +359,9 @@ fragment float4 lightingFragmentShader(vertexOutLighting inColor  [[ stage_in ]]
         float4 sample = textureIn.sample(colorSampler, inColor.textCoord);
         return  sample;
     }
-    return (inColor.color);
+    return inColor.color;
+//    return (inColor.color) * reLU(inColor.textCoord[0]) + 0.1;
+    return (inColor.color) * reLU(dot(inColor.normal, normalize(inColor.position.xyz - light))) + 0.1;
     return (inColor.color+1.0) * dot(inColor.normal, normalize(inColor.position.xyz - light));
 }
 
@@ -432,6 +558,9 @@ kernel void DerivativeGPU_All(device const void* A [[buffer(0)]], device const v
                     case 2:
                         a[gid] = 0 - b[gid];
                         break;
+                    case 3:
+                        break;
+                        
                 }
             }
             break;
@@ -451,6 +580,8 @@ kernel void DerivativeGPU_All(device const void* A [[buffer(0)]], device const v
                         break;
                     case 2:
                         a[gid] = 0 - b[gid];
+                        break;
+                    case 3:
                         break;
                 }
             }
@@ -472,6 +603,8 @@ kernel void DerivativeGPU_All(device const void* A [[buffer(0)]], device const v
                     case 2:
                         a[gid] = 0 - b[gid];
                         break;
+                    case 3:
+                        break;
                 }
             }
             break;
@@ -491,6 +624,8 @@ kernel void DerivativeGPU_All(device const void* A [[buffer(0)]], device const v
                         break;
                     case 2:
                         a[gid] = 0 - b[gid];
+                        break;
+                    case 3:
                         break;
                 }
             }
@@ -590,8 +725,7 @@ fragment float4 gridFragmentShader(VertexOut in [[stage_in]],
     // Grid colors
     float3 gridColor = float3(0.3, 0.3, 0.4);
     float3 majorGridColor = float3(0.5, 0.5, 0.6);
-    float3 xAxisColor = float3(1.0, 0.3, 0.3); // Red for X axis
-    float3 zAxisColor = float3(0.3, 0.3, 1.0); // Blue for Z axis
+
     
     // Combine colors
     float3 finalColor = gridColor;
