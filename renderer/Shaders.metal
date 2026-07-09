@@ -757,3 +757,41 @@ fragment float4 gridFragmentShader(VertexOut in [[stage_in]],
     
     return float4(finalColor, alpha);
 }
+
+vertex vertexOutLighting DAGNodeVertexShader(uint vertexID [[vertex_id]],
+                                     device const packed_float3* vert_position [[buffer(0)]],
+                                     device const float4x4* instance_buffer [[buffer(1)]],
+                                     constant float4x4& cam [[buffer(2)]],
+                                     device const float4* color_buffer [[buffer(3)]],
+                                     constant uint& color_stride [[buffer(4)]],
+                                     device const float2* uv_buffer [[buffer(5)]],
+                                     uint instanceId [[instance_id]]) 
+{
+    vertexOutLighting vertOut;
+    
+    vertOut.color = color_buffer[vertexID * color_stride];
+    
+    if (uv_buffer) {
+        vertOut.textCoord = uv_buffer[vertexID];
+    } else {
+        vertOut.textCoord = float2(0.0, 0.0);
+    }
+    
+    vertOut.normal = float3(0.0, 1.0, 0.0);
+    
+    float3 pos = vert_position[vertexID];
+    vertOut.position = cam * instance_buffer[instanceId] * float4(pos, 1.0);
+    return vertOut;
+}
+
+fragment float4 DAGNodeFragmentShader(vertexOutLighting inColor [[stage_in]],
+                                      constant bool& isTextured [[buffer(0)]],
+                                      texture2d<float, access::sample> textureIn [[texture(0)]])
+{
+    if (isTextured) {
+        constexpr sampler colorSampler(address::clamp_to_edge, filter::linear);
+        float4 sample = textureIn.sample(colorSampler, inColor.textCoord);
+        return sample * inColor.color;
+    }
+    return inColor.color;
+}
