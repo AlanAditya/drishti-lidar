@@ -4,6 +4,13 @@
 #include <string>
 #include "./../matrix.h" // Assuming matrix handles are here
 
+struct DepthBias {
+    bool custom = false;
+    float bias = 0.0f;
+    float slopeScale = 0.0f;
+    float clamp = 0.0f;
+};
+
 // 1. MATERIAL
 struct Material {
     // Shape: [N, 4] for per-vertex color mapping or [1, 4] for uniform color
@@ -11,6 +18,12 @@ struct Material {
     
     id<MTLTexture> texture = nil;
     bool has_texture = false;
+    
+    DepthBias depth_bias;
+    uint32_t pipeline_state = 3;
+    float line_width = 0.05f;
+    simd_float3 clip_min = {-1e5f, -1e5f, -1e5f}; // Default: infinite bounds
+    simd_float3 clip_max = { 1e5f,  1e5f,  1e5f};
 
     Material() : colors(matrix::of<float>({1.0f, 1.0f, 1.0f, 1.0f}).reshape(1, 4)) {
     }
@@ -33,6 +46,16 @@ struct Mesh {
 class GeoNode;
 using GeoNodeImpl = std::shared_ptr<GeoNode>;
 
+struct Topology {
+    matrix edges; // Shape: [E, 2], dtype: UInt32
+    
+    Topology() : edges(0, 0, dtype::UInt32) {}
+    
+    bool is_empty() const {
+        return edges.total_size == 0;
+    }
+};
+
 class GeoNode : public std::enable_shared_from_this<GeoNode> {
 public:
     std::string name;
@@ -44,7 +67,11 @@ public:
     
     // THE VISUALS
     Mesh mesh;
+    Topology topology;
     Material material;
+    
+    // INTERACTION
+    bool draggable = true;
     
     // THE HIERARCHY
     std::weak_ptr<GeoNode> parent;
@@ -83,7 +110,7 @@ public:
             }
         }
         
-    private:
+    
         void update_world_transform_link();
         void update_world_transform_recursive();
 };
@@ -105,7 +132,7 @@ void GeoNode::add_child(const GeoNodeImpl& child) {
 
 void GeoNode::update_world_transform_link() {
     if (auto p = parent.lock()) {
-        // Step 1 & 2: Unsqueeze for combinatorial broadcasting
+        // Step 1 & 2: Unsqueeze for combinatorial broadcasting [1, M]
         matrix parent_broad = p->world_transform.unsqueeze(1); // [P, 1, 4, 4]
         matrix child_broad  = this->local_transform.unsqueeze(0); // [1, C, 4, 4]
         

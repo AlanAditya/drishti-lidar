@@ -1,6 +1,6 @@
 #pragma once
 #include "Viewer.cpp"
-#include "Controllers.h"
+#include "Controllers.cpp"
 #include "matrix.h"
 #include <algorithm>
 #include <cmath>

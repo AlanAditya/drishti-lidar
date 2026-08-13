@@ -160,6 +160,7 @@ struct MeshPointCloudVertexOut {
 struct vertexOutLighting {
     float4 position [[position]];
     float3 WorldPos;
+    float3 local_pos;
     float3 normal;
     float4 color;
     float2 textCoord;
@@ -763,13 +764,13 @@ vertex vertexOutLighting DAGNodeVertexShader(uint vertexID [[vertex_id]],
                                      device const float4x4* instance_buffer [[buffer(1)]],
                                      constant float4x4& cam [[buffer(2)]],
                                      device const float4* color_buffer [[buffer(3)]],
-                                     constant uint& color_stride [[buffer(4)]],
+                                     constant uint2& color_strides [[buffer(4)]],
                                      device const float2* uv_buffer [[buffer(5)]],
                                      uint instanceId [[instance_id]]) 
 {
     vertexOutLighting vertOut;
     
-    vertOut.color = color_buffer[vertexID * color_stride];
+    vertOut.color = color_buffer[instanceId * color_strides.x + vertexID * color_strides.y];
     
     if (uv_buffer) {
         vertOut.textCoord = uv_buffer[vertexID];
@@ -780,14 +781,25 @@ vertex vertexOutLighting DAGNodeVertexShader(uint vertexID [[vertex_id]],
     vertOut.normal = float3(0.0, 1.0, 0.0);
     
     float3 pos = vert_position[vertexID];
-    vertOut.position = cam * instance_buffer[instanceId] * float4(pos, 1.0);
+    
+    float4 world_pos = instance_buffer[instanceId] * float4(pos, 1.0);
+    vertOut.WorldPos = world_pos.xyz;
+    vertOut.local_pos = pos;
+    vertOut.position = cam * world_pos;
+    
     return vertOut;
 }
 
 fragment float4 DAGNodeFragmentShader(vertexOutLighting inColor [[stage_in]],
                                       constant bool& isTextured [[buffer(0)]],
+                                      constant float3& clip_min [[buffer(1)]],
+                                      constant float3& clip_max [[buffer(2)]],
                                       texture2d<float, access::sample> textureIn [[texture(0)]])
 {
+    if (any(inColor.WorldPos < clip_min) || any(inColor.WorldPos > clip_max)) {
+        discard_fragment();
+    }
+
     if (isTextured) {
         constexpr sampler colorSampler(address::clamp_to_edge, filter::linear);
         float4 sample = textureIn.sample(colorSampler, inColor.textCoord);
@@ -795,3 +807,4 @@ fragment float4 DAGNodeFragmentShader(vertexOutLighting inColor [[stage_in]],
     }
     return inColor.color;
 }
+

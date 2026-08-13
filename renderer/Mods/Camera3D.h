@@ -10,6 +10,8 @@
 
 #include <simd/simd.h>
 #include <print>
+#include "../matrix.h"
+#include "../primitives.cpp"
 
 enum class TransformationMode {
     Orbit,
@@ -18,10 +20,7 @@ enum class TransformationMode {
 };
 
 class Camera3D {
-    simd_float3 oldPosition = {0.0, 0.0, -3.0};
-    simd_float3 up = {0, 1, 0};
-    simd_float3 right = {1, 0, 0};
-    simd_float3 forward = {0, 0, 1};
+
     
     float azimuthalAngle = 0;
     float polarAngle = 0;
@@ -32,8 +31,7 @@ class Camera3D {
     float aspectRatio = 1;
     
     // Camera Limits
-    float farP = 1000;
-    float nearP = 0.1;
+
     float minPolarAngle = -M_PI / 2 + 0.1;
     float maxPolarAngle = M_PI / 2 - 0.1;
     
@@ -42,18 +40,32 @@ class Camera3D {
     float sensitivity = 1;
 
 public:
+    float farP = 1024;
+    float nearP = 0.1;
     bool updated = false;
     bool isPerspective = true; // true = perspective, false = orthographic
     simd_float3 position = {0.0, 0.0, -3.00};
     simd_float3 target = {0, 0, 0};
     simd_float4x4 viewMatrix;
     simd_float4x4 inverseProjectionMatrix;
+    simd_float4x4 inverseViewMatrix;
+    
+    simd_float3 oldPosition = {0.0, 0.0, -3.0};
+    simd_float3 up = {0, 1, 0};
+    simd_float3 right = {1, 0, 0};
+    simd_float3 forward = {0, 0, 1};
+    matrix forwardMatrix;
     
     Camera3D() {
         simd_float3 vec = target - position;
         forward = simd::normalize(vec);
         right = simd::normalize(simd::cross(forward, up));
         up = simd::normalize(simd::cross(right, forward));
+        forwardMatrix = matrix::leaf({1, 3});
+        forwardMatrix.at<float>(0, 0) = forward.x;
+        forwardMatrix.at<float>(0, 1) = forward.y;
+        forwardMatrix.at<float>(0, 2) = forward.z;
+        forwardMatrix.tape->evaluated = false;
         AxisUpdated = true;
         updateAngles(position);
     }
@@ -80,6 +92,12 @@ public:
             simd_float3 zAxis = simd::normalize(target - position); // Camera forward (towards viewer in RH)
             simd_float3 xAxis = simd::normalize(simd::cross(up, zAxis)); // Right
             simd_float3 yAxis = simd::normalize(simd::cross(zAxis, xAxis)); // Up
+            
+            // Push new forward vector to the DAG and invalidate!
+            forwardMatrix.at<float>(0, 0) = zAxis.x;
+            forwardMatrix.at<float>(0, 1) = zAxis.y;
+            forwardMatrix.at<float>(0, 2) = zAxis.z;
+            forwardMatrix.tape->evaluated = false;
             
             // View matrix (right-handed)
             simd_float4 row0 = {xAxis.x, xAxis.y, xAxis.z, -simd_dot(xAxis, position)};
@@ -129,6 +147,8 @@ public:
             // Combine projection and view matrices
             viewMatrix = simd_mul(projMat, viewMat);
             inverseProjectionMatrix = inverseProjectionMat();
+            inverseProjectionMatrix = simd_inverse(projMat);
+            inverseViewMatrix = simd_inverse(viewMat);
             updated = true;
         }
     }
