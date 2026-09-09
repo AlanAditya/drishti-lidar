@@ -233,7 +233,7 @@ public:
                 [cmdEncoder setVertexBytes:&vMatrix length:sizeof(simd_float4x4) atIndex:2];
                 
                 size_m instanceCount = node->world_transform.shape()[0];
-                size_m vertexCount = (node->material.colors.dims >= 2) ? node->material.colors.shape()[node->material.colors.dims - 2] : 1;
+                size_m vertexCount = node->mesh.vert_position.dims == 2 ? node->mesh.vert_position.shape()[0] : node->mesh.vert_position.total_size / 3;
                 matrix b_colors = node->material.colors.broadcast_toV2({instanceCount, vertexCount, 4});
                 
                 struct { uint32_t inst; uint32_t vert; } color_strides = { 
@@ -258,6 +258,9 @@ public:
                     [cmdEncoder setVertexBytes:&node->material.line_width length:sizeof(float) atIndex:7];
                     uint32_t total_points = node->mesh.vert_position.shape()[0];
                     [cmdEncoder setVertexBytes:&total_points length:sizeof(uint32_t) atIndex:8];
+                }
+                if (active_state == 5) {
+                    [cmdEncoder setVertexBytes:&node->material.line_width length:sizeof(float) atIndex:7];
                 }
                 
                 if (active_state == 6) {
@@ -497,6 +500,7 @@ public:
         HitResult best_hit = {false, MAXFLOAT, nullptr, {0,0,0}};
         
         for (int i = 0; i < test_nodes.size(); i++) {
+            if (!test_nodes[i]->draggable) continue;
             if (test_nodes[i]->mesh.is_empty()) continue;
             if (test_nodes[i]->material.pipeline_state == 4) continue;
             matrix verts = test_nodes[i]->mesh.vert_position;

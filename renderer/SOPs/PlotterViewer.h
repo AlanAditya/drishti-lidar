@@ -36,10 +36,25 @@ inline RGB get_colormap_inferno(float t) {
 
 
 
+inline matrix apply_colormap(matrix t, matrix colormap_colors) {
+    t = t.clamp(0.0f, 1.0f);
+    
+    matrix scaled_t = t * (float)(colormap_colors.shape()[0] - 1);
+    
+    matrix idx1 = matrix::min(matrix::scalar((int)(colormap_colors.shape()[0]) - 2), scaled_t.astype(dtype::Int32));
+    matrix idx2 = idx1 + 1;
+    matrix frac = scaled_t - idx1.astype(dtype::Float);
+    matrix p1 = colormap_colors.take(idx1, 0);
+    matrix p2 = colormap_colors.take(idx2, 0);
+    
+    // Unsqueeze frac so it broadcasts over the RGB dimension (e.g. from HxW to HxWx1)
+    frac = frac.unsqueeze(-1);
+    
+    return p1 + (p2 - p1) * frac;
+}
+
 inline matrix get_colormap_inferno(matrix t) {
     // A simplified Inferno-like colormap (dark blue -> purple -> magenta -> orange -> yellow)
-    t = t.clamp(0.0, 1.0);
-
     static matrix colors = []() {
         matrix c = {
             {0.05f, 0.05f, 0.15f}, // Deep dark blue
@@ -54,19 +69,7 @@ inline matrix get_colormap_inferno(matrix t) {
         return c;
     }();
 
-    matrix scaled_t = t * (float)(colors.shape()[0] - 1);
-
-    
-    matrix idx1 = matrix::min(matrix::scalar((int)(colors.shape()[0]) - 2), scaled_t.astype(dtype::Int32));
-    matrix idx2 = idx1 + 1;
-    matrix frac = scaled_t - idx1.astype(dtype::Float);
-    matrix p1 = colors.take(idx1, 0);
-    matrix p2 = colors.take(idx2, 0);
-    
-    // Unsqueeze frac so it broadcasts over the RGB dimension (e.g. from HxW to HxWx1)
-    frac = frac.unsqueeze(-1);
-    
-    return p1 + (p2 - p1) * frac;
+    return apply_colormap(t, colors);
 }
 
 

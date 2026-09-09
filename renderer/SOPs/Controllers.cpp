@@ -8,24 +8,27 @@
 #import <ModelIO/ModelIO.h>
 
 class PointCloudController {
-private:
-    matrix x_stream;
-    matrix y_stream;
-
 public:
     GeoNodeImpl node;
+    float point_size = 5.0f; // Typical size for points, mapped to line_width or similar depending on shader
 
-    PointCloudController(std::string name, size_t point_count) 
-        : x_stream(0, dtype::Float), y_stream(0, dtype::Float) 
+    PointCloudController(std::string name) 
     {
         node = GeoNode::create(std::move(name));
+        node->material.pipeline_state = 5; // Point Cloud State
+        node->draggable = false;
+    }
+
+    PointCloudController(std::string name, size_t point_count) 
+    {
+        node = GeoNode::create(std::move(name));
+        node->material.pipeline_state = 5; // Point Cloud State
+        node->draggable = false;
         
-        // Setup initial graph data
-        x_stream = matrix::zeros({(size_m)point_count, 1}, dtype::Float);
-        y_stream = matrix::zeros({(size_m)point_count, 1}, dtype::Float);
+        matrix x_stream = matrix::zeros({(size_m)point_count, 1}, dtype::Float);
+        matrix y_stream = matrix::zeros({(size_m)point_count, 1}, dtype::Float);
         matrix z_stream = matrix::zeros({(size_m)point_count, 1}, dtype::Float);
 
-        // Pack handles into the generic node payload
         std::vector<matrix> streams = {x_stream, y_stream, z_stream};
         node->mesh.vert_position = matrix::concat(streams, 1);
         
@@ -41,14 +44,36 @@ public:
         node->mesh.indices = indices;
     }
 
-    void update(const matrix& new_x, const matrix& new_y) {
-        this->x_stream = new_x;
-        this->y_stream = new_y;
+    void update(matrix points, matrix colors) {
+        size_t point_count = points.shape()[0];
         
-        matrix z_stream = matrix::zeros({(size_m)x_stream.shape()[0], 1}, dtype::Float);
-        std::vector<matrix> streams = {x_stream, y_stream, z_stream};
-        node->mesh.vert_position = matrix::concat(streams, 1);
+        matrix indices(1, dtype::UInt32);
+        indices.total_size = point_count;
+        indices.shape()[0] = point_count;
+        indices.calcStrides();
+        indices.buffer = new uint8_t[point_count * sizeof(uint32_t)];
+        uint32_t* buf = (uint32_t*)indices.buffer;
+        for (size_t i = 0; i < point_count; ++i) buf[i] = (uint32_t)i;
+        if (point_count > 10) indices.buildMetalBuffer();
+        
+        GeoNodeImpl node_to_update = node;
+        float current_point_size = point_size;
+        
+        dispatch_async(dispatch_get_main_queue(), ^{
+            node_to_update->mesh.vert_position = points;
+            node_to_update->mesh.indices = indices;
+            node_to_update->material.pipeline_state = 5; // Ensure pipeline state
+            node_to_update->material.colors = colors;
+            node_to_update->material.line_width = current_point_size; // Some shaders use this for point size
+        });
     }
+
+//    void update(const matrix& new_x, const matrix& new_y) {
+//        matrix z_stream = matrix::zeros({(size_m)new_x.shape()[0], 1}, dtype::Float);
+//        std::vector<matrix> streams = {new_x, new_y, z_stream};
+//        matrix points = matrix::concat(streams, 1);
+//        update(points);
+//    }
 };
 
 class TriangleController {
@@ -263,7 +288,7 @@ public:
 
     LineController(std::string name = "Line3D", float width = 0.0025f) : line_width(width) {
         node = GeoNode::create(std::move(name));
-        node->material.pipeline_state = 3;
+        node->material.pipeline_state = 4;
     }
 // legacy bout to be gone
 //    void update(const matrix& points, matrix cam_forward_matrix) {
@@ -365,6 +390,12 @@ public:
     uint32_t num_major_lines = 31;
     uint32_t num_minor_lines;
     
+    // Cache to prevent invalidating the grid every frame
+    simd_float3 last_cam_pos = {1e9f, 1e9f, 1e9f};
+    float last_zoom_factor = 1e9f;
+    simd_float3 last_graph_scale = {1e9f, 1e9f, 1e9f};
+    simd_float3 last_graph_offset = {1e9f, 1e9f, 1e9f};
+    
     GridController() : major_lines(GeoNode::create("MajorGrid")), minor_lines(GeoNode::create("MinorGrid")) {
         num_minor_lines = 1 + 5 * (num_major_lines-1) + 4 * 2;
         root_node = GeoNode::create("GridSystem");
@@ -388,7 +419,6 @@ public:
     void get_dynamic_cell_sizes(float zoom_factor, float& big_cell, float& small_cell) {
         // Desmos-style 1-2-5 LOD scaling for infinite grids.
         // This ensures the grid scales up more frequently so we never run out of lines.
-        std::cout << zoom_factor << "\n";
         float log_zoom = std::log10(std::fmax(zoom_factor, 0.001f));
         float order = std::floor(log_zoom);
         float scale = std::pow(10.0f, order);
@@ -409,6 +439,17 @@ public:
     }
 
     void update_grid(simd_float3 cam_pos, float zoom_factor, simd_float3 graph_scale, simd_float3 graph_offset) {
+        if (simd_distance(last_cam_pos, cam_pos) < 1e-4f && 
+            std::abs(last_zoom_factor - zoom_factor) < 1e-4f &&
+            simd_distance(last_graph_scale, graph_scale) < 1e-4f &&
+            simd_distance(last_graph_offset, graph_offset) < 1e-4f) {
+            return;
+        }
+        last_cam_pos = cam_pos;
+        last_zoom_factor = zoom_factor;
+        last_graph_scale = graph_scale;
+        last_graph_offset = graph_offset;
+
         // TODO (Aditya): Logic for dynamic grid generation
         float base_thickness = 0.001f / 4;
 
@@ -736,6 +777,7 @@ public:
             id<MDLMeshBuffer> interleavedBuffer = mesh.vertexBuffers[0];
             void *interleavedData = [interleavedBuffer.map bytes];
             matrix raw_block = matrix::zeros({(size_m)num_verts, 8}, dtype::Float);
+            raw_block.eval(); // zeros() is now lazy; force the buffer to materialize before writing into it directly
             memcpy(raw_block.buffer, interleavedData, num_verts * 8 * sizeof(float));
             root_positions = raw_block[R(), R(0, 3)].astype(dtype::Float, true);
             root_uvs = raw_block[R(), R(3, 5)].astype(dtype::Float, true);
@@ -750,12 +792,15 @@ public:
             void *normalData  = [normalBuffer.map bytes];
             // Allocate matrix tensors and copy the separated contiguous memory in
             root_positions = matrix::zeros({(size_m)num_verts, 3}, dtype::Float);
+            root_positions.eval(); // zeros() is now lazy; force the buffer to materialize before writing into it directly
             memcpy(root_positions.buffer, posData, num_verts * 3 * sizeof(float));
-            
+
             root_uvs = matrix::zeros({(size_m)num_verts, 2}, dtype::Float);
+            root_uvs.eval();
             memcpy(root_uvs.buffer, uvData, num_verts * 2 * sizeof(float));
-            
+
             root_normals = matrix::zeros({(size_m)num_verts, 3}, dtype::Float);
+            root_normals.eval();
             memcpy(root_normals.buffer, normalData, num_verts * 3 * sizeof(float));
         }
         
@@ -769,7 +814,8 @@ public:
             NSUInteger num_indices = firstSubmesh.indexCount;
             
             matrix root_indices = matrix::zeros({(size_m)num_indices}, dtype::UInt32);
-            
+            root_indices.eval(); // zeros() is now lazy; force the buffer to materialize before writing into it directly
+
             // ModelIO can output 16-bit or 32-bit indices. Your matrix needs 32-bit.
             if (firstSubmesh.indexType == MDLIndexBitDepthUInt16) {
                 uint16_t *indices16 = (uint16_t *)indexData;

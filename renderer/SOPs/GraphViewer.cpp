@@ -131,10 +131,12 @@ public:
 
     virtual bool handle_event(const ViewerEvent& event) override {
         // Allow gizmo manipulation to take priority if active
-        if (Viewer::handle_event(event)) return true;
+//        if (Viewer::handle_event(event)) return true;
 
         // Ensure we only interact when the mouse is over the graph frame
+        graph_frame->draggable = true;
         HitResult hit = ray_hit_closest(event.ray_origin, event.ray_dir, {graph_frame});
+        graph_frame->draggable = false;
         if (!hit.hit) return false;
 
         if (event.type == MouseEvent::Drag || event.type == MouseEvent::Scroll) {
@@ -171,10 +173,10 @@ public:
     }
 
     void render_graph(const matrix& x, const matrix& y, matrix color = {1.0f, 1.0f, 1.0f, 1.0f}, float line_width = 0.0025f) {
-        matrix points = matrix::stack({x, y}, -1);
+        matrix points = matrix::stack({x, y, x.zeros()}, -1);
         color.begin_refcount();
         // Pad with z = 0
-        points = matrix::concat({points, matrix::zeros({points.shape()[0], 1})}, -1);
+        // points = matrix::concat({points, matrix::zeros({points.shape()[0], 1})}, -1);
         
         GeoNodeImpl node_to_update = graph_node;
         

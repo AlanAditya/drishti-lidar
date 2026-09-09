@@ -110,6 +110,7 @@ vertex DAGPointCloudVertexOut vertex_dag_pointcloud(
     constant float4x4& vMatrix [[buffer(2)]],
     constant float4* colors [[buffer(3)]],
     constant uint2& color_strides [[buffer(4)]],
+    constant float& point_size [[buffer(7)]],
     constant float4x4* local_transform_buffer [[buffer(9)]],
     constant uint& local_instances [[buffer(10)]],
     uint instanceId [[instance_id]]
@@ -131,8 +132,8 @@ vertex DAGPointCloudVertexOut vertex_dag_pointcloud(
     uint c_idx = instanceId * color_strides.x + vertexID * color_strides.y;
     vertOut.color = colors[c_idx];
     
-    // Set a constant point size for now, this could also be passed via a buffer
-    vertOut.point_size = 5.0;
+    // Read point size from buffer(7) (mapped to line_width in CPU)
+    vertOut.point_size = point_size > 0.0 ? point_size : 5.0; // Fallback to 5.0 if 0
     
     return vertOut;
 }
