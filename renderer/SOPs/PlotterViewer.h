@@ -53,6 +53,30 @@ inline matrix apply_colormap(matrix t, matrix colormap_colors) {
     return p1 + (p2 - p1) * frac;
 }
 
+//inline matrix rescale(matrix input, size_m* new_shape) {
+//    matrix gid = matrix::zeros(new_shape, dtype::UInt32);
+//    for (int i = 0; i < input.dims; i++) {
+//        gid = gid + matrix::linespace<float>(0, input.shape()[i]-1, new_shape[i]).astype(dtype::Int32).unsqueeze(-1, input.dims-i-1) * input.strides()[i];
+//    }
+//    
+//    return input.flatten().take(gid, -1);
+//}
+//
+//inline matrix rescale_lp(matrix input, size_m* new_shape) {
+//    matrix gid = matrix::zeros(new_shape, dtype::UInt32);
+//    for (int i = 0; i < input.dims; i++) {
+//        matrix idx = matrix::linespace<float>(0, input.shape()[i]-1, new_shape[i]);
+//        matrix idx1 = idx.astype(dtype::Int32);
+//        matrix idx2 = idx.astype(dtype::Int32) + 1;
+//        
+//        matrix frac = idx - idx1;
+//        
+//        gid = gid + matrix::linespace<float>(0, input.shape()[i]-1, new_shape[i]).astype(dtype::Int32).unsqueeze(-1, input.dims-i-1) * input.strides()[i];
+//    }
+//    
+//    return input.flatten().take(gid, -1);
+//}
+
 inline matrix get_colormap_inferno(matrix t) {
     // A simplified Inferno-like colormap (dark blue -> purple -> magenta -> orange -> yellow)
     static matrix colors = []() {
