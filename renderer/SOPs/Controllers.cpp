@@ -153,7 +153,7 @@ class SphereController {
 public:
     GeoNodeImpl node;
 
-    SphereController(std::string name, matrix anchor = matrix(0, dtype::Float)) {
+    SphereController(std::string name, matrix anchor = matrix(0, 0, dtype::Float)) {
         node = GeoNode::create(std::move(name));
         node->mesh = MeshPrimitives::sphere(1.0f, 16, 16);
         if (anchor.total_size > 0) {
