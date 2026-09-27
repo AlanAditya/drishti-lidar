@@ -261,6 +261,21 @@ public:
             
         }
     
+    // Snaps the camera onto `direction` from the target (e.g. {0,1,0} = top view), keeping the
+    // current distance. Orbit/pan/zoom carry on from the new position.
+    void setViewDirection(simd_float3 direction) {
+        // Straight down the y axis the look-at's cross(up, forward) is zero: lean off it slightly.
+        simd_float3 dir = simd::normalize(direction);
+        if (std::fabs(dir.y) > 0.999f) dir = simd::normalize(simd_make_float3(0, dir.y, -1e-3f));
+        float distance = simd::length(target - position);
+        position = target + dir * distance;
+        up = simd_make_float3(0, 1, 0);
+        updateAngles(position - target);
+        updateOLD();
+        AxisUpdated = false;
+        updated = false;
+    }
+
     void updateRawCamPosition(simd_float3 dPosition) {
         position += dPosition;
         target += dPosition;
@@ -268,6 +283,8 @@ public:
         
     }
     
+    float getAspectRatio() const { return aspectRatio; }
+
     void updateAspectRatio(float ratio) {
         aspectRatio = ratio;
         updated = false;

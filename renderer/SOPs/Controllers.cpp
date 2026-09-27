@@ -68,12 +68,65 @@ public:
         });
     }
 
+    // Hides the cloud (the Viewer skips nodes with an empty mesh). Swaps in a mesh with no data and
+    // no Metal buffer, on the main thread like update(); safe from any thread.
+    void clear() {
+        GeoNodeImpl n = node;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            n->mesh.vert_position = matrix(0, 0, dtype::Float);
+            n->mesh.indices = matrix(0, 0, dtype::UInt32);
+        });
+    }
+
 //    void update(const matrix& new_x, const matrix& new_y) {
 //        matrix z_stream = matrix::zeros({(size_m)new_x.shape()[0], 1}, dtype::Float);
 //        std::vector<matrix> streams = {new_x, new_y, z_stream};
 //        matrix points = matrix::concat(streams, 1);
 //        update(points);
 //    }
+};
+
+// An arbitrary triangle mesh with one colour per vertex (e.g. the foveated 2.5D grid's tiles,
+// AI/FoveatedGrid.h). update()/clear() can be called from any thread: the new geometry is swapped
+// in on the main thread, between frames, like PointCloudController. Hand it plain matrices (no
+// tape into a graph another thread is running).
+class TriangleMeshController {
+public:
+    GeoNodeImpl node;
+
+    TriangleMeshController(std::string name) {
+        node = GeoNode::create(std::move(name));
+        node->draggable = false;
+        node->material.pipeline_state = 3;   // the default mesh pipeline: indexed triangles, per-vertex colours
+    }
+
+    // vertices [V, 3] Float, colours [V, 4] Float RGBA, indices [3T] UInt32
+    void update(matrix vertices, matrix colours, matrix indices) {
+        // DAGNodeVertexShader declares a UV buffer (slot 5) and Metal's validation layer requires
+        // every declared buffer to be bound, even though the shader copes without one - so give
+        // the mesh all-zero UVs (the shader's own fallback). MeshPrimitives meshes always have UVs.
+        const size_m v = vertices.shape()[0];
+        matrix uvs = matrix::withShape({v, 2}, dtype::Float);
+        uvs.begin_refcount();
+        std::fill_n(static_cast<float*>(uvs.buffer), (size_t)v * 2, 0.0f);
+
+        GeoNodeImpl n = node;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            n->mesh.vert_position = vertices;
+            n->mesh.uv_coords = uvs;
+            n->mesh.indices = indices;
+            n->material.colors = colours;
+        });
+    }
+
+    // Hides it: the Viewer skips nodes with an empty mesh.
+    void clear() {
+        GeoNodeImpl n = node;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            n->mesh.vert_position = matrix(0, 0, dtype::Float);
+            n->mesh.indices = matrix(0, 0, dtype::UInt32);
+        });
+    }
 };
 
 class TriangleController {

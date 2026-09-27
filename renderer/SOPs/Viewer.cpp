@@ -128,6 +128,19 @@ public:
     GizmoController transform_gizmo;
     DragAxis current_drag_axis = DragAxis::None;
 
+    // Where and how the renderer draws this viewer. The defaults are the old behaviour: always,
+    // over the whole drawable, with the renderer's camera.
+    bool visible = true;                   // false: not drawn, and gets no events
+    simd_float4 viewport = {0, 0, 1, 1};   // x, y, width, height as fractions of the drawable; origin top left
+    // Null = the renderer's camera (its aspect ratio is the whole view's, so give a viewer that
+    // doesn't cover the view its own). The renderer keeps this one's aspect ratio in step with the viewport.
+    std::shared_ptr<Camera3D> camera;
+
+    // Pages only (Renderer::pages, iOS): whether orbit / pan / zoom move this page's camera, and
+    // whether the infinite grid is drawn behind it.
+    bool interactive = true;
+    bool show_grid = true;
+
     virtual ~Viewer() = default;
 
     virtual void draw(id<MTLRenderCommandEncoder> cmdEncoder, 
@@ -591,6 +604,20 @@ public:
             }
         }
         return best_hit;
+    }
+
+    // The renderer's touch handlers, rerouted: the same Camera3D calls with the same arguments,
+    // on this viewer's camera, or `fallback` (the renderer's) when it has none. Non-interactive
+    // viewers ignore them.
+    void handle_camera(float deltaX, float deltaY, bool isRightMouseButton, bool isShiftPressed,
+                       TransformationMode mode, Camera3D& fallback) {
+        if (!interactive) return;
+        (camera ? *camera : fallback).handleMouseEvents(deltaX, deltaY, isRightMouseButton, isShiftPressed, mode);
+    }
+
+    void camera_update_old(Camera3D& fallback) {
+        if (!interactive) return;
+        (camera ? *camera : fallback).updateOLD();
     }
 
     virtual bool ray_hit(simd_float3 ray_origin, simd_float3 ray_dir) {
