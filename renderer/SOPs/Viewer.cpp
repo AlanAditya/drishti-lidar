@@ -141,6 +141,12 @@ public:
     bool interactive = true;
     bool show_grid = true;
 
+    // Every matrix draw() bound to the GPU this frame. Metal reads their host memory directly
+    // (buildMetalBuffer: newBufferWithBytesNoCopy, no deallocator) after draw() returns, so the
+    // renderer takes these and keeps them alive until the frame's command buffer completes.
+    // Otherwise a controller swapping in new data frees the old buffer while the GPU still reads it.
+    std::vector<matrix> frame_refs;
+
     virtual ~Viewer() = default;
 
     virtual void draw(id<MTLRenderCommandEncoder> cmdEncoder, 
@@ -229,6 +235,12 @@ public:
                 ensure_metal(node->mesh.uv_coords);
                 ensure_metal(node->mesh.indices);
                 ensure_metal(node->topology.edges);
+
+                for (const matrix* m : {&node->mesh.vert_position, &node->local_transform, &node->world_transform,
+                                        &node->material.colors, &node->mesh.uv_coords, &node->mesh.indices,
+                                        &node->topology.edges}) {
+                    if (m->total_size > 0) frame_refs.push_back(*m);
+                }
 
                 uint32_t target_state = node->material.pipeline_state;
                 if (active_state != target_state) {
