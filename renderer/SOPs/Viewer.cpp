@@ -264,10 +264,15 @@ public:
                 ensure_metal(node->mesh.indices);
                 ensure_metal(node->topology.edges);
 
-                for (const matrix* m : {&node->mesh.vert_position, &node->local_transform, &node->world_transform,
-                                        &node->material.colors, &node->mesh.uv_coords, &node->mesh.indices,
-                                        &node->topology.edges}) {
-                    if (m->total_size > 0) frame_refs.push_back(*m);
+                for (matrix* m : {&node->mesh.vert_position, &node->local_transform, &node->world_transform,
+                                  &node->material.colors, &node->mesh.uv_coords, &node->mesh.indices,
+                                  &node->topology.edges}) {
+                    if (m->total_size == 0) continue;
+                    // A plain owned buffer (no refcount, no tape, e.g. matrix{r, g, b, a}) would be deep-copied
+                    // here, keeping a copy alive instead of the buffer the GPU reads. Make it refcounted first
+                    // (as ensure_graph_ready does for tapeless inputs) so the copy shares it.
+                    if (!m->refCount && !m->tape && m->buffer && !(m->flags & NON_OWNERSHIP_FLAG)) m->begin_refcount();
+                    frame_refs.push_back(*m);
                 }
 
                 uint32_t target_state = node->material.pipeline_state;
