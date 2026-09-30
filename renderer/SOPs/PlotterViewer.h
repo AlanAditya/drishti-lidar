@@ -114,6 +114,7 @@ inline simd_float4x4 p_scale(float sx, float sy, float sz) {
 class PlotterViewer : public Viewer {
 public:
     PlotterViewer() {
+        show_grid = false;   // a 2D plot: no infinite ground grid behind it
         // Initialize the basic scene nodes
         
         // 1. The main amplitude plot (Quad)

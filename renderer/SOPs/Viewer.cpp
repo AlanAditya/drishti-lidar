@@ -14,7 +14,7 @@
 class Camera3D; // Forward declaration
 
 
-bool HitTriangles(matrix triangles, simd_float3 ray_origin, simd_float3 ray_direction) {
+inline bool HitTriangles(matrix triangles, simd_float3 ray_origin, simd_float3 ray_direction) {
     // triangles = [N, 3]
     
     triangles = triangles.reshape((triangles.shape()[0] / 3), (uint32_t)3, (uint32_t)3);
@@ -67,7 +67,7 @@ bool HitTriangles(matrix triangles, simd_float3 ray_origin, simd_float3 ray_dire
     return (min0 >= 0 && min1 >= 0 && min2 >= 0) || (max0 <= 0 && max1 <= 0 && max2 <= 0);
 }
 
-bool point_inside_triangle(simd_float3 p, simd_float3 p1, simd_float3 p2, simd_float3 p3) {
+inline bool point_inside_triangle(simd_float3 p, simd_float3 p1, simd_float3 p2, simd_float3 p3) {
     simd_float3 e1 = p2-p1;
     simd_float3 e2 = p3-p2;
     simd_float3 e3 = p1-p3;
@@ -92,11 +92,11 @@ bool point_inside_triangle(simd_float3 p, simd_float3 p1, simd_float3 p2, simd_f
     return (d1 >= 0 && d2 >= 0 && d3 >= 0) || (d1 <= 0 && d2 <= 0 && d3 <= 0);
 }
 
-simd_float3 plane_norm(simd_float3 p1, simd_float3 p2, simd_float3 p3) {
+inline simd_float3 plane_norm(simd_float3 p1, simd_float3 p2, simd_float3 p3) {
     return simd_cross(p2-p1, p3-p1);
 }
 
-simd_float3 ray_plane_dir(simd_float3 ray_origin, simd_float3 ray_dir, simd_float3 plane_norm, simd_float3 plane_point) {
+inline simd_float3 ray_plane_dir(simd_float3 ray_origin, simd_float3 ray_dir, simd_float3 plane_norm, simd_float3 plane_point) {
     // r.n = d
     // r = bt + c
     
@@ -148,6 +148,34 @@ public:
     std::vector<matrix> frame_refs;
 
     virtual ~Viewer() = default;
+
+    // --- Drawing into this viewer. Each call adds a node and returns the controller that owns it:
+    // keep the controller and call update() / clear() on it (safe from any thread: the swap lands
+    // on the main queue, between frames), or reach the node itself through `.node`.
+
+    // points [N, 3] Float; colors [N, 4] or [4] Float RGBA.
+    PointCloudController points(matrix pts, matrix colors, float point_size = 5.0f) {
+        PointCloudController cloud("points");
+        cloud.point_size = point_size;
+        nodes.push_back(cloud.node);
+        cloud.update(pts, colors);
+        return cloud;
+    }
+
+    // vertices [V, 3] Float, colours [V, 4] Float RGBA, indices [3T] UInt32.
+    TriangleMeshController mesh(matrix vertices, matrix colours, matrix indices) {
+        TriangleMeshController m("mesh");
+        nodes.push_back(m.node);
+        m.update(vertices, colours, indices);
+        return m;
+    }
+
+    // Any controller with a `node` (WireBoxController, LabelController, ModelController, ...).
+    template <class Controller>
+    Controller add(Controller controller) {
+        nodes.push_back(controller.node);
+        return controller;
+    }
 
     virtual void draw(id<MTLRenderCommandEncoder> cmdEncoder, 
                       id<MTLDevice> metalDevice, 

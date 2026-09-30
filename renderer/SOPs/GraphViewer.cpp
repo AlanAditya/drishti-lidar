@@ -18,8 +18,13 @@ public:
     
     float origin_x = 0.0f;
     float origin_y = 0.0f;
+    Bounds2D world;              // where the graph's frame sits in world space
+    bool auto_fit = true;        // the first plot() fits the graph to its data
+    int plot_count = 0;
 
     GraphViewer(Bounds2D graph_space = {-10.0f, 10.0f, -10.0f, 10.0f}, Bounds2D world_space = {-1.0f, 1.0f, -1.0f, 1.0f}) {
+        world = world_space;
+        show_grid = false;   // a 2D graph: no infinite ground grid behind it
         float w_width = world_space.xmax - world_space.xmin;
         float w_height = world_space.ymax - world_space.ymin;
         float w_cx = (world_space.xmax + world_space.xmin) / 2.0f;
@@ -170,6 +175,35 @@ public:
         }
         
         return false;
+    }
+
+    // Shows graph_space (x/y data ranges) across the frame, like the constructor does.
+    void set_bounds(Bounds2D graph_space) {
+        float scale_x = (world.xmax - world.xmin) / (graph_space.xmax - graph_space.xmin);
+        float scale_y = (world.ymax - world.ymin) / (graph_space.ymax - graph_space.ymin);
+        origin_x = world.xmin - graph_space.xmin * scale_x;
+        origin_y = world.ymin - graph_space.ymin * scale_y;
+        graph_node->local_transform.SIMD_MAT(0) = Translation(simd_make_float3(origin_x, origin_y, 0.0f)) * Scale(simd_make_float3(scale_x, scale_y, 1.0f));
+        graph_node->local_transform.tape->version = ++global_epoch;
+    }
+
+    // Adds a curve (x, y: [N] Float) and returns its LineController; any number of curves per graph.
+    // The first one fits the graph to its data (10% margin) unless auto_fit is off.
+    LineController plot(const matrix& x, const matrix& y, simd_float4 color = {1, 1, 1, 1}, float line_width = 0.0025f) {
+        if (auto_fit && plot_count == 0) {
+            float xmin = x.min().at<float>(), xmax = x.max().at<float>();
+            float ymin = y.min().at<float>(), ymax = y.max().at<float>();
+            if (xmax <= xmin) { xmin -= 1; xmax += 1; }
+            if (ymax <= ymin) { ymin -= 1; ymax += 1; }
+            float mx = 0.1f * (xmax - xmin), my = 0.1f * (ymax - ymin);
+            set_bounds({xmin - mx, xmax + mx, ymin - my, ymax + my});
+        }
+        plot_count++;
+        LineController line("plot", line_width);
+        line.node->material.colors = {color.x, color.y, color.z, color.w};
+        add_child(line.node, simd_make_float3(0, 0, 0));
+        line.update(x, y);
+        return line;
     }
 
     void render_graph(const matrix& x, const matrix& y, matrix color = {1.0f, 1.0f, 1.0f, 1.0f}, float line_width = 0.0025f) {

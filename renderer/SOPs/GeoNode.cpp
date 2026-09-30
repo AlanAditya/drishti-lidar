@@ -115,7 +115,7 @@ public:
         void update_world_transform_recursive();
 };
 
-void GeoNode::add_child(const GeoNodeImpl& child) {
+inline void GeoNode::add_child(const GeoNodeImpl& child) {
     // 1. Break existing parent bond if it exists
     if (auto current_parent = child->parent.lock()) {
         auto& siblings = current_parent->children;
@@ -130,7 +130,7 @@ void GeoNode::add_child(const GeoNodeImpl& child) {
     child->update_world_transform_recursive();
 }
 
-void GeoNode::update_world_transform_link() {
+inline void GeoNode::update_world_transform_link() {
     if (auto p = parent.lock()) {
         // Step 1 & 2: Unsqueeze for combinatorial broadcasting [1, M]
         matrix parent_broad = p->world_transform.unsqueeze(1); // [P, 1, 4, 4]
@@ -147,7 +147,7 @@ void GeoNode::update_world_transform_link() {
     }
 }
 
-void GeoNode::update_world_transform_recursive() {
+inline void GeoNode::update_world_transform_recursive() {
     update_world_transform_link();
     for (auto& child : children) {
         child->update_world_transform_recursive();
