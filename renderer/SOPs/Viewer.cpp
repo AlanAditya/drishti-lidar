@@ -190,7 +190,8 @@ public:
             simd_float3 centre = active_node->world_transform.SIMD_MAT(0).columns[3].xyz;
             float zoom_dist = simd_length(centre - cam->position);
             transform_gizmo.node->local_transform.SIMD_MAT(0) = active_node->world_transform.SIMD_MAT(0) * Scale(0.1 * zoom_dist);
-            transform_gizmo.node->local_transform.tape->version = ++global_epoch;
+            if (transform_gizmo.node->local_transform.tape) transform_gizmo.node->local_transform.tape->version = ++global_epoch;
+            else transform_gizmo.node->invalidate();
         }
         
         std::vector<GeoNodeImpl> scene_nodes;
@@ -543,7 +544,10 @@ public:
                 }
                 
                 active_node->local_transform.SIMD_MAT(0) = active_node->local_transform.SIMD_MAT(0) * Translation(delta_pos);
-                active_node->local_transform.tape->version = ++global_epoch;
+                // A plain transform (no tape, e.g. set_local_transform(transform_of(...))) has no version to bump:
+                // invalidate the node instead, so its world transform and its children's re-evaluate.
+                if (active_node->local_transform.tape) active_node->local_transform.tape->version = ++global_epoch;
+                else active_node->invalidate();
                 break;
             }
             case MouseEvent::Zoom:
