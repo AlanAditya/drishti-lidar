@@ -148,9 +148,9 @@ public:
             
             for (int x = 0; x < 16; ++x) {
                 int idx = (y * 16 + x) * 4;
-                scale_buf[idx + 0] = r;
+                scale_buf[idx + 0] = b;   // ToMTLTexture makes a BGRA texture
                 scale_buf[idx + 1] = g;
-                scale_buf[idx + 2] = b;
+                scale_buf[idx + 2] = r;
                 scale_buf[idx + 3] = 255;
             }
         }
@@ -184,6 +184,14 @@ public:
         size_m W = amplitude_map.shape()[1];
         
         
+        // Small inputs are read on the host: evaluate the input (it may still be a lazy graph, whose
+        // buffer isn't computed yet), packing it first only if it's a strided view.
+        matrix host;
+        if (amplitude_map.total_size <= 1024) {
+            host = (amplitude_map.flags & NON_CONTIGUOUS_FLAG) ? amplitude_map.astype(dtype::Float, true) : amplitude_map;
+            host.eval();
+        }
+
         // Find min and max for normalization
         float min_val = std::isnan(fixed_min) ? std::numeric_limits<float>::max() : fixed_min;
         float max_val = std::isnan(fixed_max) ? std::numeric_limits<float>::lowest() : fixed_max;
@@ -194,8 +202,8 @@ public:
                 if (std::isnan(fixed_min)) min_val = amplitude_map.min().at<float>();
                 if (std::isnan(fixed_max)) max_val = amplitude_map.max().at<float>();
             } else {
-                float* amp_buf = (float*)amplitude_map.buffer;
-                for (size_t i = 0; i < amplitude_map.total_size; ++i) {
+                float* amp_buf = (float*)host.buffer;
+                for (size_t i = 0; i < host.total_size; ++i) {
                     float val = amp_buf[i];
                     if (std::isnan(fixed_min) && val < min_val) min_val = val;
                     if (std::isnan(fixed_max) && val > max_val) max_val = val;
@@ -209,14 +217,15 @@ public:
         matrix color_img(3, dtype::UInt8);
         if (amplitude_map.total_size > 1024) {
             matrix normalised_map = (amplitude_map - min_val) / range;
-            normalised_map = get_colormap_inferno(normalised_map);
-            normalised_map = matrix::concat({normalised_map, matrix::ones({normalised_map.shape()[0], normalised_map.shape()[1], 1}, dtype::Float) }, 2) * 255.0f;
+            normalised_map = get_colormap_inferno(normalised_map);   // [H, W, 3] RGB
+            // ToMTLTexture makes a BGRA texture, so lay the channels out as B, G, R, A.
+            normalised_map = matrix::concat({normalised_map[R(), R(), R(2, 3)], normalised_map[R(), R(), R(1, 2)], normalised_map[R(), R(), R(0, 1)],
+                                             matrix::ones({normalised_map.shape()[0], normalised_map.shape()[1], 1}, dtype::Float) }, 2) * 255.0f;
             normalised_map = normalised_map.astype(dtype::UInt8);
             normalised_map.eval_metal();
             nodes[0]->material.texture = normalised_map.ToMTLTexture();
         } else {
-            const_cast<matrix&>(amplitude_map).update_from_trace();
-            float* amp_buf = (float*) amplitude_map.buffer;
+            float* amp_buf = (float*) host.buffer;
             color_img.shape()[0] = H;
             color_img.shape()[1] = W;
             color_img.shape()[2] = 4;
@@ -230,9 +239,9 @@ public:
                 float t = (amp_buf[i] - min_val) / range;
                 RGB c = get_colormap_inferno(t);
                 
-                color_buf[i * 4 + 0] = (uint8_t)(c.r * 255.0f);
+                color_buf[i * 4 + 0] = (uint8_t)(c.b * 255.0f);   // BGRA, like the texture
                 color_buf[i * 4 + 1] = (uint8_t)(c.g * 255.0f);
-                color_buf[i * 4 + 2] = (uint8_t)(c.b * 255.0f);
+                color_buf[i * 4 + 2] = (uint8_t)(c.r * 255.0f);
                 color_buf[i * 4 + 3] = 255;
             }
             
