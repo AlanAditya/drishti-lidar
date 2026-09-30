@@ -119,6 +119,15 @@ public:
         // 1. The main amplitude plot (Quad)
         QuadController plot_quad("AmplitudePlot");
         // default transform is identity. Width/Height 1.0f.
+        // Row 0 of the map at the top, like imshow: the quad's UVs put v = 0 (the texture's first
+        // row in Metal) at the bottom, so flip v on this quad only (the scale bar relies on it).
+        plot_quad.node->mesh.uv_coords = matrix::of<float>({
+            {0.0f, 1.0f},   // bottom-left
+            {1.0f, 1.0f},   // bottom-right
+            {1.0f, 0.0f},   // top-right
+            {0.0f, 0.0f}    // top-left
+        });
+        plot_quad.node->mesh.uv_coords.begin_refcount();
         nodes.push_back(plot_quad.node);
         
         // 2. The scale bar (Quad)
