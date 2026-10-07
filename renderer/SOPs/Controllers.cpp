@@ -513,8 +513,10 @@ public:
         // AND the user's manual zooming (which scales the graph_node).
         // We calibrate the zoom_factor (camera distance) by ~11.0 so the baseline grid size is preserved.
         float cal_zoom = zoom_factor / 11.0f;
-        float effective_zoom_x = cal_zoom / std::fmax(graph_scale.x, 0.0001f);
-        float effective_zoom_y = cal_zoom / std::fmax(graph_scale.y, 0.0001f);
+        // Only guard against 0: data spanning ~1e9 has a scale ~1e-9, and clamping it higher picks
+        // cells far too small for it, which stacks every line on one spot.
+        float effective_zoom_x = cal_zoom / std::fmax(graph_scale.x, FLT_MIN);
+        float effective_zoom_y = cal_zoom / std::fmax(graph_scale.y, FLT_MIN);
 
         float big_cell_width_x, small_cell_width_x;
         big_cell_width_x = 2.0;
