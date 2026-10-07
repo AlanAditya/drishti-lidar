@@ -394,8 +394,10 @@ public:
 //        });
 //    }
 
+    // Any dtype is promoted to Float (the line shader reads float positions).
     void update(matrix points) {
         if (points.shape()[0] < 2) return;
+        if (points.type != dtype::Float) points = points.astype(dtype::Float);
         
         GeoNodeImpl node_to_update = node;
         float current_line_width = line_width;
@@ -409,6 +411,8 @@ public:
     }
     
     void update(matrix x, matrix y) {
+        if (x.type != dtype::Float) x = x.astype(dtype::Float);
+        if (y.type != dtype::Float) y = y.astype(dtype::Float);
         matrix points = matrix::stack({x, y, x.zeros()}, -1);
         
         GeoNodeImpl node_to_update = node;

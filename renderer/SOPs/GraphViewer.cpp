@@ -189,7 +189,10 @@ public:
 
     // Adds a curve (x, y: [N] Float) and returns its LineController; any number of curves per graph.
     // The first one fits the graph to its data (10% margin) unless auto_fit is off.
-    LineController plot(const matrix& x, const matrix& y, simd_float4 color = {1, 1, 1, 1}, float line_width = 0.0025f) {
+    // x / y of any dtype are promoted to Float (the line shader reads float positions).
+    LineController plot(const matrix& x_in, const matrix& y_in, simd_float4 color = {1, 1, 1, 1}, float line_width = 0.0025f) {
+        matrix x = x_in.type == dtype::Float ? x_in : x_in.astype(dtype::Float);
+        matrix y = y_in.type == dtype::Float ? y_in : y_in.astype(dtype::Float);
         if (auto_fit && plot_count == 0) {
             float xmin = x.min().at<float>(), xmax = x.max().at<float>();
             float ymin = y.min().at<float>(), ymax = y.max().at<float>();
