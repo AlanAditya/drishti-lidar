@@ -58,23 +58,47 @@ vertex VertexLineOut vertex_line3d(
     float3 world_p_next = (instance_buffer[instanceId] * float4(p_next, 1.0)).xyz;
     float3 world_p_prev = (instance_buffer[instanceId] * float4(p_prev, 1.0)).xyz;
     
-    if (has_next) {
-        dir = normalize(world_p_next - world_p);
-    } else if (has_prev) {
-        dir = normalize(world_p - world_p_prev);
+    // Miter join: extrude along the bisector of the incoming and outgoing segments, not just the
+    // outgoing one. Extruding perpendicular to the outgoing segment only twists the incoming
+    // segment's quad at a corner, so the line pinches to zero width there (a 90 degree corner
+    // became a bow-tie).
+    float3 dir_in = has_prev ? world_p - world_p_prev : float3(0);
+    float3 dir_out = has_next ? world_p_next - world_p : float3(0);
+    bool in_ok = length_squared(dir_in) > 1e-12;     // repeated points have no direction
+    bool out_ok = length_squared(dir_out) > 1e-12;
+    dir_in = in_ok ? normalize(dir_in) : dir_out;
+    dir_out = out_ok ? normalize(dir_out) : dir_in;
+    float miter_scale = 1.0;
+    if (!in_ok && !out_ok) {
+        dir = float3(1, 0, 0);
     } else {
-        dir = float3(1, 0, 0); 
+        float3 bisector = dir_in + dir_out;
+        if (length_squared(bisector) < 1e-6) {
+            dir = dir_out;                           // the line doubles back: no sensible miter
+        } else {
+            dir = normalize(bisector);
+            // Both segments keep their full width: the offset grows by 1 / cos(half the turn),
+            // capped at 4x so sharp turns don't spike.
+            miter_scale = 1.0 / max(dot(dir, dir_out), 0.25);
+        }
     }
     
-    // Exact view direction for this vertex
+    // Extrude in the screen plane: perpendicular to the camera's forward axis, not to this
+    // vertex's own view ray. Off-centre that ray is tilted, so extruding across it also moves the
+    // two edges in depth, and on a 2D graph the far edge went behind the frame's backing quad
+    // (thick lines tapered towards the sides). For a perspective vMatrix (projection * view) the
+    // w row is the forward axis; an orthographic one has none, so fall back to the view ray.
     float3 view_dir = normalize(cam_pos - world_p);
+    float3 forward = float3(vMatrix[0][3], vMatrix[1][3], vMatrix[2][3]);
+    bool has_forward = length_squared(forward) > 1e-12;
+    float3 facing = has_forward ? normalize(forward) : view_dir;
     
-    // Perpendicular extrusion in world space (naturally tapers to 0 when pointing at camera)
-    float3 right = cross(dir, view_dir);
+    // Perpendicular extrusion (naturally tapers to 0 when the line points at the camera)
+    float3 right = cross(dir, facing);
     
-    // Scale thickness by distance to camera to maintain constant screen-space pixel width
-    float dist = length(cam_pos - world_p);
-    float3 offset_p = world_p + right * line_width * dist * side;
+    // Scale thickness by depth to maintain constant screen-space pixel width
+    float dist = has_forward ? abs(dot(cam_pos - world_p, facing)) : length(cam_pos - world_p);
+    float3 offset_p = world_p + right * line_width * miter_scale * dist * side;
     
     // Apply camera projection * view matrix
     vertOut.position = vMatrix * float4(offset_p, 1.0);
