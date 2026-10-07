@@ -358,9 +358,10 @@ public:
                 } else if (active_state == 4) { // SOA Thick Line
                     apply_bias(node->material.depth_bias);
                     uint32_t pointCount = node->mesh.vert_position.shape()[0];
-                    [cmdEncoder drawPrimitives: MTLPrimitiveTypeTriangleStrip
+                    // A quad per segment, then a disc per point for the round joins (see vertex_line3d)
+                    [cmdEncoder drawPrimitives: MTLPrimitiveTypeTriangle
                                    vertexStart: 0 
-                                   vertexCount: pointCount * 2
+                                   vertexCount: pointCount * 12
                                  instanceCount: instanceCount];
                 } else if (node->mesh.indices.metalBuffer) {
                     apply_bias(node->material.depth_bias);
