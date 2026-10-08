@@ -246,3 +246,50 @@ vertex VertexLineOut vertex_edge3d(
 fragment float4 fragment_edge3d(VertexLineOut inColor [[stage_in]]) {
     return inColor.color;
 }
+
+// ---- Text labels (pipeline_state 7, LabelController) ---------------------------------------------
+// One instance per glyph (or background plate), all of a label's data packed in its float4x4 (the
+// Viewer binds the instance matrices at slot 1):
+//   [0] = anchor xyz (world), w = layer (0 plate, 1 glyph: glyphs are pulled a hair nearer in depth)
+//   [1] = quad rect in label units (x0, y0, width, height; 1 unit = one glyph height, y up)
+//   [2] = atlas rect (u0, v0, u1, v1)
+//   [3] = rgba
+// The quad is built in clip space around the projected anchor, so labels always face the camera
+// and keep a constant size on screen: `params.x` = glyph height as a fraction of the viewport
+// height, `params.y` = the viewport's aspect ratio (width / height).
+struct LabelOut {
+    float4 position [[position]];
+    float2 uv;
+    float4 color;
+};
+
+vertex LabelOut vertex_label(
+    uint vertexID [[vertex_id]],
+    uint instanceId [[instance_id]],
+    constant packed_float3* vertices [[buffer(0)]],     // unit quad corners, 0..1
+    constant float4x4* glyphs [[buffer(1)]],
+    constant float4x4& vMatrix [[buffer(2)]],
+    constant float2& params [[buffer(7)]]
+) {
+    float4x4 g = glyphs[instanceId];
+    float2 corner = float3(vertices[vertexID]).xy;
+    float4 clip = vMatrix * float4(g[0].xyz, 1.0);
+    float2 local = g[1].xy + corner * g[1].zw;
+    float2 ndc = local * params.x * 2.0;                 // NDC spans 2 units of height
+    clip.xy += float2(ndc.x / params.y, ndc.y) * clip.w;
+    clip.z -= g[0].w * 2e-4 * clip.w;
+
+    LabelOut out;
+    out.position = clip;
+    out.uv = float2(mix(g[2].x, g[2].z, corner.x), mix(g[2].w, g[2].y, corner.y));   // atlas v runs down
+    out.color = g[3];
+    return out;
+}
+
+fragment float4 fragment_label(LabelOut in [[stage_in]],
+                               texture2d<float, access::sample> atlas [[texture(0)]]) {
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    float a = atlas.sample(s, in.uv).a * in.color.a;
+    if (a < 0.02) discard_fragment();
+    return float4(in.color.rgb, a);
+}

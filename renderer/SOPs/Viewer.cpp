@@ -179,7 +179,7 @@ public:
 
     virtual void draw(id<MTLRenderCommandEncoder> cmdEncoder, 
                       id<MTLDevice> metalDevice, 
-                      id<MTLRenderPipelineState> __strong (&predefinedStates)[7], 
+                      id<MTLRenderPipelineState> __strong (&predefinedStates)[8], 
                       Camera3D* cam, 
                       int& active_state) {
         current_pass_id +=1;
@@ -205,11 +205,12 @@ public:
             gizmo_nodes = gather_nodes(transform_gizmo.node);
         }
 
-        std::vector<GeoNodeImpl> mesh_nodes, pc_nodes, line_nodes, edge_nodes;
-        split_nodes(scene_nodes, mesh_nodes, pc_nodes, line_nodes, edge_nodes);
+        std::vector<GeoNodeImpl> mesh_nodes, pc_nodes, line_nodes, edge_nodes, label_nodes;
+        split_nodes(scene_nodes, mesh_nodes, pc_nodes, line_nodes, edge_nodes, label_nodes);
 
         std::vector<GeoNodeImpl> gizmo_mesh_nodes, gizmo_pc_nodes, gizmo_line_nodes, gizmo_edge_nodes;
-        split_nodes(gizmo_nodes, gizmo_mesh_nodes, gizmo_pc_nodes, gizmo_line_nodes, gizmo_edge_nodes);
+        std::vector<GeoNodeImpl> gizmo_label_nodes;
+        split_nodes(gizmo_nodes, gizmo_mesh_nodes, gizmo_pc_nodes, gizmo_line_nodes, gizmo_edge_nodes, gizmo_label_nodes);
         
         DepthBias current_bias = {false, 0.0f, 0.0f, 0.0f};
         auto apply_bias = [&](const DepthBias& target) {
@@ -236,6 +237,7 @@ public:
         invalidate_nodes(scene_nodes);
         invalidate_nodes(line_nodes);
         invalidate_nodes(edge_nodes);
+        invalidate_nodes(label_nodes);
         invalidate_nodes(gizmo_nodes);
         invalidate_nodes(gizmo_line_nodes);
         invalidate_nodes(gizmo_edge_nodes);
@@ -330,6 +332,11 @@ public:
                     [cmdEncoder setVertexBytes:&node->material.line_width length:sizeof(float) atIndex:7];
                 }
 
+                if (active_state == 7) {   // text labels: glyph height (fraction of the viewport) + aspect
+                    simd_float2 label_params = {node->material.line_width, cam->getAspectRatio()};
+                    [cmdEncoder setVertexBytes:&label_params length:sizeof(label_params) atIndex:7];
+                }
+
                 bool isTextured = node->material.has_texture;
                 [cmdEncoder setFragmentBytes:&isTextured length:sizeof(bool) atIndex:0];
                 if (isTextured && node->material.texture) {
@@ -380,6 +387,7 @@ public:
         draw_nodes(pc_nodes, cam->viewMatrix);
         draw_nodes(line_nodes, cam->viewMatrix);
         draw_nodes(edge_nodes, cam->viewMatrix);
+        draw_nodes(label_nodes, cam->viewMatrix);   // last: translucent plates blend over the scene
 
         if (active_node) {
             simd_float4x4 overlayMatrix = cam->viewMatrix;
@@ -423,7 +431,8 @@ private:
                      std::vector<GeoNodeImpl>& mesh_nodes, 
                      std::vector<GeoNodeImpl>& pc_nodes, 
                      std::vector<GeoNodeImpl>& line_nodes,
-                     std::vector<GeoNodeImpl>& edge_nodes) {
+                     std::vector<GeoNodeImpl>& edge_nodes,
+                     std::vector<GeoNodeImpl>& label_nodes) {
         for (const auto& node : flat_nodes) {
             if (node->mesh.is_empty()) continue;
             
@@ -436,6 +445,8 @@ private:
                 edge_nodes.push_back(node);
             } else if (state == 3) { // SOA Mesh
                 mesh_nodes.push_back(node);
+            } else if (state == 7) { // Text labels (LabelController)
+                label_nodes.push_back(node);
             }
         }
     }

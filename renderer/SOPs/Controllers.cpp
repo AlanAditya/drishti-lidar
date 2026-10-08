@@ -129,6 +129,133 @@ public:
     }
 };
 
+// Text labels that always face the camera and keep a constant size on screen (like three.js
+// sprites / CSS2D labels, or RViz's TEXT_VIEW_FACING). Glyphs come from one atlas texture (Menlo
+// Bold, drawn once with CPURasteriser::drawTextCG, which MatrixH.mm includes before this file), and
+// every glyph of every label is one instance of a unit quad on pipeline 7 (DAGShaders.metal
+// vertex_label): one draw call for all labels. Each label sits on a translucent plate for contrast.
+// Characters outside the atlas (lower case is upper-cased) are drawn as spaces.
+// update()/clear() can be called from any thread (swapped in on the main thread).
+class LabelController {
+public:
+    GeoNodeImpl node;
+    float size = 0.018f;   // glyph height, as a fraction of the viewport height
+
+    LabelController(std::string name) {
+        node = GeoNode::create(std::move(name));
+        node->draggable = false;
+        node->material.pipeline_state = 7;
+        node->material.has_texture = true;
+        node->material.texture = atlas().texture;
+        node->material.line_width = size;
+        quad_.vert_position = matrix::of<float>({{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}});
+        quad_.uv_coords = matrix::of<float>({{0, 0}, {1, 0}, {1, 1}, {0, 1}});
+        quad_.indices = matrix::of<uint32_t>({0, 1, 2, 0, 2, 3});
+        quad_.vert_position.begin_refcount();
+        quad_.uv_coords.begin_refcount();
+        quad_.indices.begin_refcount();
+    }
+
+    // One label per anchor (world position of the label's bottom centre), all the same colours.
+    void update(const std::vector<simd_float3>& anchors, const std::vector<std::string>& texts,
+                simd_float4 text_rgba = {0.72f, 0.93f, 1.0f, 1.0f},
+                simd_float4 plate_rgba = {0.02f, 0.08f, 0.14f, 0.55f}) {
+        const Atlas& at = atlas();
+        const size_t n = std::min(anchors.size(), texts.size());
+        size_t count = 0;
+        for (size_t i = 0; i < n; ++i) count += 1 + texts[i].size();
+        if (count == 0) { clear(); return; }
+
+        const float advance = at.glyph_aspect, pad = 0.2f, lift = 0.35f;
+        matrix inst = matrix::withShape({(size_m)count, 4, 4}, dtype::Float);
+        inst.begin_refcount();
+        size_t k = 0;
+        auto put = [&](simd_float3 a, float layer, simd_float4 rect, simd_float4 uv, simd_float4 rgba) {
+            simd_float4x4& m = inst.SIMD_MAT((int)k++);
+            m.columns[0] = simd_make_float4(a, layer);
+            m.columns[1] = rect;
+            m.columns[2] = uv;
+            m.columns[3] = rgba;
+        };
+        for (size_t i = 0; i < n; ++i) {
+            const std::string& s = texts[i];
+            const float w = advance * s.size();
+            const float x0 = -0.5f * w, y0 = lift;
+            put(anchors[i], 0, simd_make_float4(x0 - pad, y0 - pad, w + 2 * pad, 1 + 2 * pad), at.uv(Atlas::kSolid), plate_rgba);
+            for (size_t c = 0; c < s.size(); ++c) {
+                put(anchors[i], 1, simd_make_float4(x0 + c * advance, y0, advance, 1), at.uv(at.index(s[c])), text_rgba);
+            }
+        }
+
+        GeoNodeImpl nd = node;
+        Mesh quad = quad_;
+        float sz = size;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            nd->mesh = quad;
+            nd->material.line_width = sz;
+            nd->set_local_transform(inst);
+        });
+    }
+
+    // Hides it (the Viewer skips nodes with an empty mesh).
+    void clear() {
+        GeoNodeImpl nd = node;
+        dispatch_async(dispatch_get_main_queue(), ^{ nd->mesh = Mesh(); });
+    }
+
+private:
+    Mesh quad_;
+
+    struct Atlas {
+        static constexpr const char* kChars = " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ./-:%()#+";
+        static constexpr int kCols = 16, kCellW = 32, kCellH = 64;
+        static constexpr int kSolid = 0;      // index of the filled cell (the plate), after the chars
+        int rows = 0, count = 0;
+        float glyph_aspect = (float)kCellW / kCellH;
+        id<MTLTexture> texture = nil;
+
+        int index(char ch) const {
+            if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 'a' + 'A');
+            const char* p = std::strchr(kChars, ch);
+            return (p && ch) ? (int)(p - kChars) + 1 : 1;   // unknown -> the space cell
+        }
+        // Atlas rect of cell i, inset half a texel so linear filtering doesn't bleed across cells.
+        simd_float4 uv(int i) const {
+            const float W = kCols * kCellW, H = rows * kCellH;
+            int col = i % kCols, row = i / kCols;
+            return simd_make_float4((col * kCellW + 0.5f) / W, (row * kCellH + 0.5f) / H,
+                                    ((col + 1) * kCellW - 0.5f) / W, ((row + 1) * kCellH - 0.5f) / H);
+        }
+    };
+
+    // Cell 0 is solid (the plates), cells 1.. are kChars. White glyphs, so only alpha matters.
+    static const Atlas& atlas() {
+        static const Atlas a = [] {
+            Atlas at;
+            at.count = 1 + (int)std::strlen(Atlas::kChars);
+            at.rows = (at.count + Atlas::kCols - 1) / Atlas::kCols;
+            const int W = Atlas::kCols * Atlas::kCellW, H = at.rows * Atlas::kCellH;
+            matrix img = matrix::withShape({(size_m)H, (size_m)W, 4}, dtype::UInt8);
+            img.begin_refcount();
+            std::memset(img.buffer, 0, (size_t)W * H * 4);
+            uint8_t* px = (uint8_t*)img.buffer;
+            for (int y = 0; y < Atlas::kCellH; ++y)
+                std::memset(px + (size_t)y * W * 4, 255, Atlas::kCellW * 4);   // cell 0
+            matrix white = matrix{255u, 255u, 255u, 255u};
+            for (int i = 1; i < at.count; ++i) {
+                char s[2] = {Atlas::kChars[i - 1], 0};
+                if (s[0] == ' ') continue;
+                int cx = (i % Atlas::kCols) * Atlas::kCellW + Atlas::kCellW / 2;
+                int cy = (i / Atlas::kCols) * Atlas::kCellH + Atlas::kCellH / 2;
+                CPURasteriser::drawTextCG(img, s, "Menlo-Bold", 46.0f, cx, cy, white, simd_make_float2(0, 0));
+            }
+            at.texture = img.ToMTLTexture();
+            return at;
+        }();
+        return a;
+    }
+};
+
 class TriangleController {
 public:
     GeoNodeImpl node;
