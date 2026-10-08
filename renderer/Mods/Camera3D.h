@@ -276,6 +276,18 @@ public:
         updated = false;
     }
 
+    // Places the camera at `eye` looking at `centre` (y up). Orbit/pan/zoom carry on from there,
+    // like setViewDirection.
+    void lookAt(simd_float3 eye, simd_float3 centre) {
+        position = eye;
+        target = centre;
+        up = simd_make_float3(0, 1, 0);
+        updateAngles(position - target);
+        updateOLD();
+        AxisUpdated = false;
+        updated = false;
+    }
+
     void updateRawCamPosition(simd_float3 dPosition) {
         position += dPosition;
         target += dPosition;

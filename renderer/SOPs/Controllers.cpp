@@ -129,6 +129,111 @@ public:
     }
 };
 
+// Wireframe boxes: the unit cube (MeshPrimitives::cube + cube_edges) on the edge pipeline (6), one
+// instance per box, so any number of boxes is one draw call. Each instance's transform maps the unit
+// cube (-0.5..0.5 on every axis) onto its box. Drawn twice for a sci-fi look: a thin bright core
+// (`node`) and a wider translucent glow (`glow`, a child, so it shares the instances). The core is
+// drawn first and the depth test is Less, so the glow only lands around the core, not over it.
+// update()/clear() can be called from any thread (swapped in on the main thread, like the others).
+class WireBoxController {
+public:
+    GeoNodeImpl node;
+    GeoNodeImpl glow;
+
+    WireBoxController(std::string name,
+                      simd_float4 core_rgba = {0.72f, 0.93f, 1.0f, 1.0f},
+                      simd_float4 glow_rgba = {0.25f, 0.65f, 1.0f, 0.28f},
+                      float core_width = 0.0004f, float glow_width = 0.0014f) {
+        cube_ = MeshPrimitives::cube(1.0f, 1.0f, 1.0f);
+        edges_ = MeshPrimitives::cube_edges();
+
+        node = GeoNode::create(name);
+        glow = GeoNode::create(name + " glow");
+        auto style = [&](const GeoNodeImpl& n, simd_float4 rgba, float width) {
+            n->topology.edges = edges_;
+            n->material.pipeline_state = 6;
+            n->material.colors = matrix::of<float>({rgba.x, rgba.y, rgba.z, rgba.w}).reshape(1, 4);
+            n->material.line_width = width;   // edge shader: half-width = line_width * camera distance
+            n->draggable = false;
+        };
+        style(node, core_rgba, core_width);
+        style(glow, glow_rgba, glow_width);
+        node->add_child(glow);
+    }
+
+    // transforms [N, 4, 4] Float, N >= 1: unit cube -> box, column-vector convention (what the
+    // edge shader applies: M * float4(p, 1)).
+    void update(matrix transforms) {
+        GeoNodeImpl n = node, g = glow;
+        Mesh cube = cube_;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            n->mesh = cube;
+            g->mesh = cube;
+            n->set_local_transform(transforms);   // also re-links the glow's world transform
+        });
+    }
+
+    // Hides both (the Viewer skips nodes with an empty mesh).
+    void clear() {
+        GeoNodeImpl n = node, g = glow;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            n->mesh = Mesh();
+            g->mesh = Mesh();
+        });
+    }
+
+private:
+    Mesh cube_;
+    matrix edges_ = matrix(0, 0, dtype::UInt32);
+};
+
+// A quick low-poly model made of boxes (e.g. the ego car in kitti_replay): solid unit-cube
+// instances, one colour each, with a WireBoxController outline over them. The solids and the
+// outline are siblings under an empty root: parenting one N-instance node under another would
+// multiply them into N x N instances (see GeoNode's instance broadcasting).
+// set()/clear() can be called from any thread (swapped in on the main thread).
+class BoxModelController {
+public:
+    GeoNodeImpl node;                        // the root: add this to a viewer
+    GeoNodeImpl solids;
+    WireBoxController outline;
+
+    BoxModelController(std::string name, simd_float4 edge_rgba = {0.72f, 0.93f, 1.0f, 1.0f},
+                       simd_float4 glow_rgba = {0.25f, 0.65f, 1.0f, 0.28f})
+        : outline(name + " outline", edge_rgba, glow_rgba) {
+        node = GeoNode::create(name);
+        node->draggable = false;
+        solids = GeoNode::create(name + " solids");
+        solids->draggable = false;
+        solids->material.pipeline_state = 3;
+        cube_ = MeshPrimitives::cube(1.0f, 1.0f, 1.0f);
+        node->add_child(solids);
+        node->add_child(outline.node);
+    }
+
+    // transforms [N, 4, 4]: unit cube -> each part (column-vector convention, like
+    // WireBoxController); colours [N, 1, 4]: one RGBA per part.
+    void set(matrix transforms, matrix colours) {
+        GeoNodeImpl s = solids;
+        Mesh cube = cube_;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            s->mesh = cube;
+            s->material.colors = colours;
+            s->set_local_transform(transforms);
+        });
+        outline.update(transforms);
+    }
+
+    void clear() {
+        GeoNodeImpl s = solids;
+        dispatch_async(dispatch_get_main_queue(), ^{ s->mesh = Mesh(); });
+        outline.clear();
+    }
+
+private:
+    Mesh cube_;
+};
+
 // Text labels that always face the camera and keep a constant size on screen (like three.js
 // sprites / CSS2D labels, or RViz's TEXT_VIEW_FACING). Glyphs come from one atlas texture (Menlo
 // Bold, drawn once with CPURasteriser::drawTextCG, which MatrixH.mm includes before this file), and
