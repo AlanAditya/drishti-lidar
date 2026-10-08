@@ -129,6 +129,7 @@ public:
             {0.0f, 0.0f}    // top-left
         });
         plot_quad.node->mesh.uv_coords.begin_refcount();
+        plot_quad.node->draggable = false;   // a fixed plot: clicks mustn't select or drag it (the gizmo)
         nodes.push_back(plot_quad.node);
         
         // 2. The scale bar (Quad)
@@ -168,6 +169,7 @@ public:
         
         scale_bar.node->material.has_texture = true;
         scale_bar.node->material.texture = scale_img.ToMTLTexture();
+        scale_bar.node->draggable = false;
         nodes.push_back(scale_bar.node);
         
         // 3. Rectangle frame (Boundary)
@@ -180,6 +182,7 @@ public:
         // GeoNode creates Material with solid white color by default.
         // We just need to make sure it doesn't try to load a texture.
         frame_quad.node->material.has_texture = false; 
+        frame_quad.node->draggable = false;
         
         nodes.push_back(frame_quad.node);
     }
