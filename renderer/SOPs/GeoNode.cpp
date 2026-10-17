@@ -96,18 +96,14 @@ public:
         // Structural Mutation API
         void add_child(const GeoNodeImpl& child);
         
+        // A tapeless transform (host data, e.g. transform_of) becomes a leaf, so local_transform
+        // always has a tape: after an in-place edit (SIMD_MAT), bump
+        // local_transform.tape->version = ++global_epoch and the Viewer's invalidate_pass
+        // re-runs only the dirty path down to the world transforms.
         void set_local_transform(const matrix& new_transform) {
             this->local_transform = new_transform;
+            if (!this->local_transform.tape) this->local_transform.make_leaf();
             update_world_transform_recursive();
-        }
-        
-        // Use this when you mutate local_transform's buffer directly (e.g., via SIMD_MAT)
-        // to force the downstream DAG nodes (like world_transform) to re-evaluate.
-        void invalidate() {
-            world_transform.clear_trace_checks();
-            for (auto& child : children) {
-                child->invalidate();
-            }
         }
         
     
