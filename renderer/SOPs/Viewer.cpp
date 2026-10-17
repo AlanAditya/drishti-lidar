@@ -170,6 +170,19 @@ public:
         return m;
     }
 
+    // img [H, W, 3|4], UInt8 or Float in [0, 1]: a quad 1 tall and W/H wide, row 0 at the top.
+    // Leave img out to fill it later with update(). Also turns the ground grid off and, if this
+    // viewer has its own camera, frames the image head-on, its height filling the view (zoom out
+    // for a wide image in a narrow tile).
+    ImageController image(matrix img = matrix(0, 0, dtype::UInt8), ImageController::Order order = ImageController::Order::RGBA) {
+        ImageController pic("image");
+        nodes.push_back(pic.node);
+        if (img.dims != 0) pic.update(img, order);
+        show_grid = false;
+        if (camera) camera->lookAt(simd_make_float3(0, 0, -0.52f / std::tan((float)M_PI * 0.125f)), simd_make_float3(0, 0, 0));
+        return pic;
+    }
+
     // Any controller with a `node` (WireBoxController, LabelController, ModelController, ...).
     template <class Controller>
     Controller add(Controller controller) {

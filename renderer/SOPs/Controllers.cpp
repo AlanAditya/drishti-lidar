@@ -408,6 +408,67 @@ public:
     }
 };
 
+// An image on a quad, through the normal mesh path (no special pipeline): the texture rides on
+// the material, like PlotterViewer's plot. The quad is 1 unit tall and W/H wide, centred on the
+// origin. update() is safe from any thread: the swap lands on the main queue, between frames.
+class ImageController {
+public:
+    enum class Order { RGBA, BGRA };   // RGBA is what matrix::fromImage gives, BGRA what CapReader does
+
+    GeoNodeImpl node;
+
+    ImageController(std::string name) {
+        node = GeoNode::create(std::move(name));
+        node->mesh = MeshPrimitives::quad(1.0f, 1.0f);
+        // Row 0 at the top, like imshow: the quad's UVs put v = 0 (the texture's first row in
+        // Metal) at the bottom, so flip v.
+        node->mesh.uv_coords = matrix::of<float>({
+            {0.0f, 1.0f},   // bottom-left
+            {1.0f, 1.0f},   // bottom-right
+            {1.0f, 0.0f},   // top-right
+            {0.0f, 0.0f}    // top-left
+        });
+        node->mesh.uv_coords.begin_refcount();
+        node->draggable = false;
+    }
+
+    // img: [H, W, 3] or [H, W, 4], UInt8, or Float in [0, 1]. A 3-channel image is opaque.
+    void update(matrix img, Order order = Order::RGBA) {
+        if (img.dims != 3 || (img.shape()[2] != 3 && img.shape()[2] != 4)) {
+            throw std::runtime_error("ImageController::update: expected [H, W, 3] or [H, W, 4]");
+        }
+        size_m H = img.shape()[0], W = img.shape()[1];
+        if (H == 0 || W == 0) return;
+        if (img.type != dtype::UInt8) img = (img.clamp(0.0f, 1.0f) * 255.0f).astype(dtype::UInt8);
+
+        // ToMTLTexture makes a BGRA texture: lay the channels out as B, G, R, A.
+        matrix bgra = img;
+        if (order == Order::RGBA || img.shape()[2] == 3) {
+            matrix alpha = img.shape()[2] == 4 ? img[R(), R(), R(3, 4)]
+                                               : (matrix::ones({H, W, 1}, dtype::UInt8) * 255).astype(dtype::UInt8);
+            matrix b = order == Order::RGBA ? img[R(), R(), R(2, 3)] : img[R(), R(), R(0, 1)];
+            matrix r = order == Order::RGBA ? img[R(), R(), R(0, 1)] : img[R(), R(), R(2, 3)];
+            bgra = matrix::concat({b, img[R(), R(), R(1, 2)], r, alpha}, 2);
+        }
+        if (bgra.tape) bgra.eval_metal();
+        id<MTLTexture> tex = bgra.ToMTLTexture();
+
+        // A fresh [1, 4, 4] buffer (as Comp's transform_of) rather than SIMD_MAT into the current
+        // one, which a frame still in flight may be reading.
+        matrix aspect = matrix::withShape({1, 4, 4}, dtype::Float);
+        aspect.begin_refcount();
+        aspect.SIMD_MAT(0) = matrix_identity_float4x4;
+        aspect.SIMD_MAT(0).columns[0][0] = (float)W / (float)H;
+
+        GeoNodeImpl n = node;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            n->material.texture = tex;
+            n->material.has_texture = true;
+            n->set_local_transform(aspect);
+        });
+    }
+};
+
 class CubeController {
 public:
     GeoNodeImpl node;
