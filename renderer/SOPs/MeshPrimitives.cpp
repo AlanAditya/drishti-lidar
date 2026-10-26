@@ -60,11 +60,11 @@ namespace MeshPrimitives {
 
     inline matrix quad_edges() {
         auto edges = matrix::of<uint32_t>({
-            0, 1,
-            1, 2,
-            2, 3,
-            3, 0
-        }).reshape(4, 2);
+            {0, 1},
+            {1, 2},
+            {2, 3},
+            {3, 0}
+        });
         edges.begin_refcount();
         return edges;
     }
@@ -72,12 +72,12 @@ namespace MeshPrimitives {
     inline matrix cube_edges() {
         auto edges = matrix::of<uint32_t>({
             // Bottom face
-            0, 1,  1, 2,  2, 3,  3, 0,
+            {0, 1},  {1, 2},  {2, 3},  {3, 0},
             // Top face
-            4, 5,  5, 6,  6, 7,  7, 4,
+            {4, 5},  {5, 6},  {6, 7},  {7, 4},
             // Pillars
-            0, 4,  1, 5,  2, 6,  3, 7
-        }).reshape(12, 2);
+            {0, 4},  {1, 5},  {2, 6},  {3, 7}
+        });
         edges.begin_refcount();
         return edges;
     }
