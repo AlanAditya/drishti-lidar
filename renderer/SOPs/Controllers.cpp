@@ -2,7 +2,7 @@
 #include <string>
 #include <vector>
 #include <simd/simd.h>
-#include "matrix.h"
+#include "../matrix/matrix.h"
 #include "GeoNode.cpp"
 #include "MeshPrimitives.cpp"
 #import <ModelIO/ModelIO.h>

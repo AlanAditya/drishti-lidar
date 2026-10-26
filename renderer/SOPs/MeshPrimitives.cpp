@@ -1,5 +1,5 @@
 #pragma once
-#include "matrix.h"
+#include "../matrix/matrix.h"
 
 #include "GeoNode.cpp"
 

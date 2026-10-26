@@ -10,8 +10,8 @@
 
 #include <simd/simd.h>
 #include <print>
-#include "../matrix.h"
-#include "../primitives.cpp"
+#include "../matrix/matrix.h"
+#include "../matrix/primitives.cpp"
 
 enum class TransformationMode {
     Orbit,

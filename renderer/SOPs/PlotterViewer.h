@@ -1,7 +1,7 @@
 #pragma once
 #include "Viewer.cpp"
 #include "Controllers.cpp"
-#include "matrix.h"
+#include "../matrix/matrix.h"
 #include <algorithm>
 #include <cmath>
 #include <vector>

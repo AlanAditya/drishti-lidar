@@ -1,7 +1,7 @@
 #pragma once
 #include "Viewer.cpp"
 #include "Controllers.cpp"
-#include "matrix.h"
+#include "../matrix/matrix.h"
 @import Utils;
 
 struct Bounds2D {

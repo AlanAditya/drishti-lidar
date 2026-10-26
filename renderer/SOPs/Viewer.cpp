@@ -2,9 +2,9 @@
 #include <vector>
 #include <simd/simd.h>
 #include "GeoNode.cpp"
-#include "./../primitives.cpp"
+#include "./../matrix/primitives.cpp"
 #include "./../Mods/Utils.h"
-#include "./../matrix.h"
+#include "./../matrix/matrix.h"
 #include "Controllers.cpp"
 
 // Forward declarations to make code compile if necessary (conceptual)
