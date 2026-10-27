@@ -439,6 +439,9 @@ public:
         }
         size_m H = img.shape()[0], W = img.shape()[1];
         if (H == 0 || W == 0) return;
+        // img is our own copy: if it's a view, drop the flag so the assignments below rebind
+        // it instead of copying into the caller's buffer.
+        img.flags &= ~NON_OWNERSHIP_FLAG;
         if (img.type != dtype::UInt8) img = (img.clamp(0.0f, 1.0f) * 255.0f).astype(dtype::UInt8);
 
         // ToMTLTexture makes a BGRA texture: lay the channels out as B, G, R, A.
@@ -451,13 +454,20 @@ public:
             bgra = matrix::concat({b, img[R(), R(), R(1, 2)], r, alpha}, 2);
         }
         if (bgra.tape) bgra.eval_metal();
+
+        // Same size as the texture already on the node: blit into it, nothing else changes.
+        id<MTLTexture> current = node->material.texture;
+        if (current && current.width == (NSUInteger)W && current.height == (NSUInteger)H) {
+            bgra.CopyToTexture(current);
+            return;
+        }
         id<MTLTexture> tex = bgra.ToMTLTexture();
 
         // A fresh [1, 4, 4] buffer (as Comp's transform_of) rather than SIMD_MAT into the current
         // one, which a frame still in flight may be reading.
-        matrix aspect = matrix::withShape({1, 4, 4}, dtype::Float);
-        aspect.begin_refcount();
-        aspect.SIMD_MAT(0) = matrix_identity_float4x4;
+        matrix aspect = matrix::eye(4).unsqueeze(0);
+        aspect.eval();
+        aspect.releaseTape();
         aspect.SIMD_MAT(0).columns[0][0] = (float)W / (float)H;
 
         GeoNodeImpl n = node;
