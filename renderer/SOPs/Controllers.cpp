@@ -361,6 +361,48 @@ private:
     }
 };
 
+// Wireframe boxes, each with a camera-facing label on top (e.g. every tracked car and its speed):
+// a WireBoxController and a LabelController as siblings under an empty root, like
+// BoxModelController (parenting the labels under the N-instance box node would apply every box's
+// transform to every label). Each label sits on its box's top centre, the unit cube's (0, 0.5, 0)
+// carried through the box's transform, so it follows any box placement.
+// update()/clear() can be called from any thread (swapped in on the main thread).
+class LabelledBoxController {
+public:
+    GeoNodeImpl node;                        // the root: add this to a viewer
+    WireBoxController boxes;
+    LabelController labels;
+    simd_float4 text_rgba;
+
+    LabelledBoxController(std::string name, simd_float4 edge_rgba = {0.72f, 0.93f, 1.0f, 1.0f},
+                          simd_float4 glow_rgba = {0.25f, 0.65f, 1.0f, 0.28f})
+        : boxes(name + " boxes", edge_rgba, glow_rgba), labels(name + " labels"), text_rgba(edge_rgba) {
+        node = GeoNode::create(name);
+        node->draggable = false;
+        node->add_child(boxes.node);
+        node->add_child(labels.node);
+    }
+
+    // transforms [N, 4, 4] Float: unit cube -> each box (column-vector convention, as
+    // WireBoxController); texts: one label per box, in the same order. N = 0 clears both.
+    void update(matrix transforms, const std::vector<std::string>& texts) {
+        const size_m n = transforms.dims ? transforms.shape()[0] : 0;
+        if (n == 0) { clear(); return; }
+        std::vector<simd_float3> anchors((size_t)n);
+        for (size_m i = 0; i < n; ++i) {
+            const simd_float4 top = simd_mul(transforms.SIMD_MAT((int)i), simd_make_float4(0, 0.5f, 0, 1));
+            anchors[i] = top.xyz;
+        }
+        boxes.update(transforms);
+        labels.update(anchors, texts, text_rgba);
+    }
+
+    void clear() {
+        boxes.clear();
+        labels.clear();
+    }
+};
+
 class TriangleController {
 public:
     GeoNodeImpl node;
