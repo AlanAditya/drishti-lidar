@@ -6,10 +6,127 @@ struct VertexLineOut {
     float4 position [[position]];
     float4 color;
     float3 local_pos;
-    float2 disc_uv;   // vertex_line3d's round joins: where in the disc (outside past length 1), 0 on the strip
+    float2 disc_uv;   // vertex_line3d_round: where in a joint's disc (outside past length 1), else 0
 };
 
+// Pipeline 4: thick line as one triangle strip, 2 vertices per point (Viewer draws 2N). The
+// cheap line: constant screen width and mitered joints, but sharp turns spike. Pipeline 8
+// (vertex_line3d_round, below) draws round joins and caps for 6x the vertices.
 vertex VertexLineOut vertex_line3d(
+    uint vertexID [[vertex_id]],
+    constant packed_float3* points [[buffer(0)]],
+    constant float4x4* instance_buffer [[buffer(1)]],
+    constant float4x4& vMatrix [[buffer(2)]],
+    constant float4* colors [[buffer(3)]],
+    constant uint2& color_strides [[buffer(4)]],
+    constant packed_float3& cam_pos [[buffer(6)]],
+    constant float& line_width [[buffer(7)]],
+    constant uint& total_points [[buffer(8)]],
+    constant float4x4* local_transform_buffer [[buffer(9)]],
+    constant uint& local_instances [[buffer(10)]],
+    uint instanceId [[instance_id]]
+) {
+    VertexLineOut vertOut;
+    vertOut.disc_uv = float2(0);   // fragment_line3d's disc test never discards the strip
+    
+    // Each point generates 2 vertices (left and right)
+    uint point_idx = vertexID / 2;
+    float side = (vertexID % 2 == 0) ? -1.0 : 1.0;
+    
+    // Safety check
+    if (point_idx >= total_points) {
+        vertOut.position = float4(0,0,0,0);
+        return vertOut;
+    }
+    
+    float3 p = points[point_idx];
+    
+    // Pen-lift check (NaN point collapses the quad)
+    if (isnan(p.x)) {
+        vertOut.position = float4(0,0,0,0);
+        return vertOut;
+    }
+    
+    // Calculate position for fragment clipping bounds in world space
+    vertOut.local_pos = (instance_buffer[instanceId] * float4(p, 1.0)).xyz;
+    
+    // Compute direction to next or previous point
+    float3 dir;
+    bool has_next = (point_idx < total_points - 1) && !isnan(points[point_idx + 1].x);
+    bool has_prev = (point_idx > 0) && !isnan(points[point_idx - 1].x);
+    
+    float3 p_next = has_next ? float3(points[point_idx + 1]) : p;
+    float3 p_prev = has_prev ? float3(points[point_idx - 1]) : p;
+    
+    // Map points to world space BEFORE computing directions to ensure non-uniform scaling works
+    float3 world_p = (instance_buffer[instanceId] * float4(p, 1.0)).xyz;
+    float3 world_p_next = (instance_buffer[instanceId] * float4(p_next, 1.0)).xyz;
+    float3 world_p_prev = (instance_buffer[instanceId] * float4(p_prev, 1.0)).xyz;
+    
+    // Extrude in the screen plane: perpendicular to the camera's forward axis, not to this
+    // vertex's own view ray. Off-centre that ray is tilted, so extruding across it also moves the
+    // two edges in depth, and on a 2D graph the far edge went behind the frame's backing quad
+    // (thick lines tapered towards the sides). For a perspective vMatrix (projection * view) the
+    // w row is the forward axis; an orthographic one has none, so fall back to the view ray.
+    float3 view_dir = normalize(cam_pos - world_p);
+    float3 forward = float3(vMatrix[0][3], vMatrix[1][3], vMatrix[2][3]);
+    bool has_forward = length_squared(forward) > 1e-12;
+    float3 facing = has_forward ? normalize(forward) : view_dir;
+    
+    // Constant width, like a pipe's silhouette: the segments are projected onto the screen plane
+    // and the line is extruded perpendicular to what is seen, by the full width. (Extruding by
+    // cross(dir, facing) unnormalised thinned the line wherever it turned towards or away from the
+    // camera.) A segment pointing straight at the camera projects to a dot and takes the other
+    // side's direction.
+    float3 dir_in = has_prev ? world_p - world_p_prev : float3(0);
+    float3 dir_out = has_next ? world_p_next - world_p : float3(0);
+    dir_in -= dot(dir_in, facing) * facing;
+    dir_out -= dot(dir_out, facing) * facing;
+    bool in_ok = length_squared(dir_in) > 1e-12;
+    bool out_ok = length_squared(dir_out) > 1e-12;
+    dir_in = in_ok ? normalize(dir_in) : dir_out;
+    dir_out = out_ok ? normalize(dir_out) : dir_in;
+    
+    // Miter join: extrude along the bisector of the incoming and outgoing segments, not just the
+    // outgoing one. Extruding perpendicular to the outgoing segment only twists the incoming
+    // segment's quad at a corner, so the line pinches to zero width there (a 90 degree corner
+    // became a bow-tie).
+    float miter_scale = 1.0;
+    if (!in_ok && !out_ok) {
+        dir = float3(0);                             // a dot on screen: nothing to extrude across
+    } else {
+        float3 bisector = dir_in + dir_out;
+        if (length_squared(bisector) < 1e-6) {
+            dir = dir_out;                           // the line doubles back: no sensible miter
+        } else {
+            dir = normalize(bisector);
+            // Both segments keep their full width: the offset grows by 1 / cos(half the turn),
+            // capped at 4x. So sharp turns still spike (up to 4x the half width): use pipeline 8
+            // (vertex_line3d_round) for round joins.
+            miter_scale = 1.0 / max(dot(dir, dir_out), 0.25);
+        }
+    }
+    
+    // dir and facing are perpendicular unit vectors, so this is unit length (or 0 for a dot)
+    float3 right = cross(dir, facing);
+    
+    // Scale thickness by depth to maintain constant screen-space pixel width
+    float dist = has_forward ? abs(dot(cam_pos - world_p, facing)) : length(cam_pos - world_p);
+    float3 offset_p = world_p + right * line_width * miter_scale * dist * side;
+    
+    // Apply camera projection * view matrix
+    vertOut.position = vMatrix * float4(offset_p, 1.0);
+    
+    // Apply color
+    uint c_idx = instanceId * color_strides.x + point_idx * color_strides.y;
+    vertOut.color = colors[c_idx];
+    
+    return vertOut;
+}
+
+// Pipeline 8: thick line with round joins and caps (Viewer draws 12N vertices, plain triangles).
+// Same inputs and fragment shader as pipeline 4 (vertex_line3d, above).
+vertex VertexLineOut vertex_line3d_round(
     uint vertexID [[vertex_id]],
     constant packed_float3* points [[buffer(0)]],
     constant float4x4* instance_buffer [[buffer(1)]],
@@ -248,15 +365,25 @@ fragment float4 fragment_edge3d(VertexLineOut inColor [[stage_in]]) {
 }
 
 // ---- Text labels (pipeline_state 7, LabelController) ---------------------------------------------
-// One instance per glyph (or background plate), all of a label's data packed in its float4x4 (the
-// Viewer binds the instance matrices at slot 1):
-//   [0] = anchor xyz (world), w = layer (0 plate, 1 glyph: glyphs are pulled a hair nearer in depth)
-//   [1] = quad rect in label units (x0, y0, width, height; 1 unit = one glyph height, y up)
-//   [2] = atlas rect (u0, v0, u1, v1)
-//   [3] = rgba
+// One Glyph per quad (a letter or a label's background plate), from mesh.glyphs (slot 11). The node's
+// world transforms (slot 1) are ordinary transforms: the Viewer draws instances x glyphs, and each
+// glyph's anchor goes through its instance's transform, so labels move with their parents.
 // The quad is built in clip space around the projected anchor, so labels always face the camera
-// and keep a constant size on screen: `params.x` = glyph height as a fraction of the viewport
-// height, `params.y` = the viewport's aspect ratio (width / height).
+// and keep a constant size on screen whatever the transform's scale.
+struct Glyph {
+    packed_float3 anchor;   // the label's bottom centre, in the node's space (packed: the record is 64 bytes)
+    float layer;            // 0 plate, 1 letter (letters are pulled a hair nearer in depth)
+    float4 rect;            // quad in label units (x0, y0, width, height; 1 unit = one glyph height, y up)
+    float4 uv;              // atlas rect (u0, v0, u1, v1)
+    float4 rgba;
+};
+
+struct LabelParams {
+    float size;          // glyph height as a fraction of the viewport height
+    float aspect;        // the viewport's width / height
+    uint glyph_count;    // glyphs per instance
+};
+
 struct LabelOut {
     float4 position [[position]];
     float2 uv;
@@ -267,22 +394,24 @@ vertex LabelOut vertex_label(
     uint vertexID [[vertex_id]],
     uint instanceId [[instance_id]],
     constant packed_float3* vertices [[buffer(0)]],     // unit quad corners, 0..1
-    constant float4x4* glyphs [[buffer(1)]],
+    constant float4x4* instance_buffer [[buffer(1)]],
     constant float4x4& vMatrix [[buffer(2)]],
-    constant float2& params [[buffer(7)]]
+    constant LabelParams& params [[buffer(7)]],
+    constant Glyph* glyphs [[buffer(11)]]
 ) {
-    float4x4 g = glyphs[instanceId];
+    Glyph g = glyphs[instanceId % params.glyph_count];
+    float4x4 model = instance_buffer[instanceId / params.glyph_count];
     float2 corner = float3(vertices[vertexID]).xy;
-    float4 clip = vMatrix * float4(g[0].xyz, 1.0);
-    float2 local = g[1].xy + corner * g[1].zw;
-    float2 ndc = local * params.x * 2.0;                 // NDC spans 2 units of height
-    clip.xy += float2(ndc.x / params.y, ndc.y) * clip.w;
-    clip.z -= g[0].w * 2e-4 * clip.w;
+    float4 clip = vMatrix * (model * float4(float3(g.anchor), 1.0));
+    float2 local = g.rect.xy + corner * g.rect.zw;
+    float2 ndc = local * params.size * 2.0;              // NDC spans 2 units of height
+    clip.xy += float2(ndc.x / params.aspect, ndc.y) * clip.w;
+    clip.z -= g.layer * 2e-4 * clip.w;
 
     LabelOut out;
     out.position = clip;
-    out.uv = float2(mix(g[2].x, g[2].z, corner.x), mix(g[2].w, g[2].y, corner.y));   // atlas v runs down
-    out.color = g[3];
+    out.uv = float2(mix(g.uv.x, g.uv.z, corner.x), mix(g.uv.w, g.uv.y, corner.y));   // atlas v runs down
+    out.color = g.rgba;
     return out;
 }
 

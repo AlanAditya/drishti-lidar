@@ -766,6 +766,8 @@ vertex vertexOutLighting DAGNodeVertexShader(uint vertexID [[vertex_id]],
                                      device const float4* color_buffer [[buffer(3)]],
                                      constant uint2& color_strides [[buffer(4)]],
                                      device const float2* uv_buffer [[buffer(5)]],
+                                     device const packed_float3* normal_buffer [[buffer(6)]],
+                                     constant uint& has_normals [[buffer(7)]],
                                      uint instanceId [[instance_id]]) 
 {
     vertexOutLighting vertOut;
@@ -778,11 +780,21 @@ vertex vertexOutLighting DAGNodeVertexShader(uint vertexID [[vertex_id]],
         vertOut.textCoord = float2(0.0, 0.0);
     }
     
-    vertOut.normal = float3(0.0, 1.0, 0.0);
-    
     float3 pos = vert_position[vertexID];
     
     float4 world_pos = instance_buffer[instanceId] * float4(pos, 1.0);
+
+    // Normals go through the cofactor matrix of the instance's 3x3 (the inverse-transpose times the
+    // determinant), so non-uniform scale keeps them perpendicular to the surface. Zero = none: the
+    // fragment shader then uses the flat face normal.
+    if (has_normals) {
+        float4x4 w = instance_buffer[instanceId];
+        float3 a = w[0].xyz, b = w[1].xyz, c = w[2].xyz;
+        float3x3 cofactor = float3x3(cross(b, c), cross(c, a), cross(a, b));
+        vertOut.normal = cofactor * float3(normal_buffer[vertexID]);
+    } else {
+        vertOut.normal = float3(0.0);
+    }
     vertOut.WorldPos = world_pos.xyz;
     vertOut.local_pos = pos;
     vertOut.position = cam * world_pos;
@@ -790,21 +802,218 @@ vertex vertexOutLighting DAGNodeVertexShader(uint vertexID [[vertex_id]],
     return vertOut;
 }
 
+// Shadow pass: casters' positions as the light sees them. Depth only, no fragment shader.
+vertex float4 shadow_vertex(uint vertexID [[vertex_id]], uint instanceId [[instance_id]],
+                            device const packed_float3* vert_position [[buffer(0)]],
+                            device const float4x4* instance_buffer [[buffer(1)]],
+                            constant float4x4& light_vp [[buffer(2)]]) {
+    return light_vp * (instance_buffer[instanceId] * float4(float3(vert_position[vertexID]), 1.0));
+}
+
+// How much of the shadow-casting light reaches world_pos: 1 lit, 0 in shadow, in between at the soft
+// edges. Projects the point into the shadow map and compares depths: 3x3 samples, each a hardware 2x2
+// filtered comparison (PCF).
+static float shadow_visibility(depth2d<float, access::sample> map, float3 world_pos, float4x4 light_vp, float n_dot_l) {
+    constexpr sampler cmp(coord::normalized, filter::linear, address::clamp_to_edge, compare_func::less_equal);
+    float4 p = light_vp * float4(world_pos, 1.0);
+    float3 ndc = p.xyz / p.w;
+    if (any(abs(ndc.xy) > 1.0)) return 1.0;                        // beside the light's box: no caster there
+    float2 uv = float2(ndc.x, -ndc.y) * 0.5 + 0.5;                 // NDC y is up, texture v is down
+    float bias = mix(0.003, 0.0005, saturate(n_dot_l));             // surfaces at grazing angles need more
+    // The box is fitted to the casters, so a receiver beyond its far end (the floor under a ball in the air)
+    // is behind all of them: clamp to the far end, so it's shadowed wherever a caster was recorded and lit
+    // where the map is still clear (1.0).
+    float depth = min(ndc.z - bias, 1.0);
+    float2 texel = 1.0 / float2(map.get_width(), map.get_height());
+    float lit = 0.0;
+    for (int y = -1; y <= 1; y++)
+        for (int x = -1; x <= 1; x++)
+            lit += map.sample_compare(cmp, uv + float2(x, y) * texel, depth);
+    return lit / 9.0;
+}
+
+// ACES filmic tone mapping: Stephen Hill's fit of the ACES reference transform (RRT + ODT), the same
+// curve and matrices three.js uses for ACESFilmicToneMapping. Linear in, linear out (the sRGB
+// framebuffer encodes afterwards).
+static float3 aces_rrt_odt_fit(float3 v) {
+    float3 a = v * (v + 0.0245786) - 0.000090537;
+    float3 b = v * (0.983729 * v + 0.4329510) + 0.238081;
+    return a / b;
+}
+static float3 aces_filmic(float3 color) {
+    const float3x3 aces_input = float3x3(float3(0.59719, 0.07600, 0.02840),     // sRGB -> ACES AP1, columns
+                                         float3(0.35458, 0.90834, 0.13383),
+                                         float3(0.04823, 0.01566, 0.83777));
+    const float3x3 aces_output = float3x3(float3( 1.60475, -0.10208, -0.00327),  // AP1 -> sRGB, columns
+                                          float3(-0.53108,  1.10813, -0.07276),
+                                          float3(-0.07367, -0.00605,  1.07602));
+    return saturate(aces_output * aces_rrt_odt_fit(aces_input * color));
+}
+
+// Neutral tone mapping: the highlight compression of Khronos PBR Neutral (three.js's NeutralToneMapping).
+// Colours whose brightest channel is below 0.76 pass through unchanged; brighter ones are compressed
+// toward 1 and slightly desaturated at the very top. Keeps base / brand colours accurate. Linear in,
+// linear out. Unlike the Khronos spec, there's no black-level offset ("toe"): it subtracts the same
+// amount from every channel of a dark colour, which on a dark scene crushes near-greys and pushes them
+// toward their strongest channel (a dark cool floor turned visibly blue).
+static float3 neutral_tone_map(float3 color) {
+    const float start_compression = 0.8 - 0.04;
+    const float desaturation = 0.15;
+    float peak = max(color.r, max(color.g, color.b));
+    if (peak < start_compression) return color;
+    float d = 1.0 - start_compression;
+    float new_peak = 1.0 - d * d / (peak + d - start_compression);
+    color *= new_peak / peak;
+    float g = 1.0 - 1.0 / (desaturation * (peak - new_peak) + 1.0);
+    return mix(color, float3(new_peak), g);
+}
+
+// --- Physically based shading (Shading::Standard), as three.js's MeshStandardMaterial ---
+
+// GGX / Trowbridge-Reitz normal distribution: how many microfacets face the half vector.
+static float D_GGX(float n_dot_h, float alpha) {
+    float a2 = alpha * alpha;
+    float d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+    return a2 / (M_PI_F * d * d);
+}
+
+// Smith height-correlated visibility, G / (4 N.L N.V): microfacets shadowing / masking each other
+// (three.js's V_GGX_SmithCorrelated).
+static float V_SmithGGXCorrelated(float n_dot_l, float n_dot_v, float alpha) {
+    float a2 = alpha * alpha;
+    float gv = n_dot_l * sqrt(a2 + (1.0 - a2) * n_dot_v * n_dot_v);
+    float gl = n_dot_v * sqrt(a2 + (1.0 - a2) * n_dot_l * n_dot_l);
+    return 0.5 / max(gv + gl, 1e-6);
+}
+
+// Schlick Fresnel: reflectance rises toward 1 at grazing angles.
+static float3 F_Schlick(float3 f0, float v_dot_h) {
+    return f0 + (1.0 - f0) * pow(1.0 - v_dot_h, 5.0);
+}
+
+// Specular part of ambient light, until we have environment maps: Karis's analytic fit of the
+// split-sum environment BRDF. Without it, metals under ambient light alone would be black.
+static float3 env_brdf_approx(float3 f0, float roughness, float n_dot_v) {
+    const float4 c0 = float4(-1.0, -0.0275, -0.572, 0.022);
+    const float4 c1 = float4(1.0, 0.0425, 1.04, -0.04);
+    float4 r = roughness * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * n_dot_v)) * r.x + r.y;
+    float2 ab = float2(-1.04, 1.04) * a004 + r.zw;
+    return f0 * ab.x + ab.y;
+}
+
+// A Viewer light, as GPULight in SOPs/GeoNode.cpp packs it.
+struct GPULight {
+    float4 position_type;     // xyz position, w type (0 directional, 1 point)
+    float4 direction_range;   // xyz direction the light travels (directional), w range (point: half-strength distance)
+    float4 color_intensity;   // rgb colour, a intensity
+};
+
 fragment float4 DAGNodeFragmentShader(vertexOutLighting inColor [[stage_in]],
                                       constant bool& isTextured [[buffer(0)]],
                                       constant float3& clip_min [[buffer(1)]],
                                       constant float3& clip_max [[buffer(2)]],
-                                      texture2d<float, access::sample> textureIn [[texture(0)]])
+                                      constant uint& shading [[buffer(3)]],        // Shading: 0 unlit, 1 lit, 2 standard
+                                      constant float3& camera_pos [[buffer(4)]],
+                                      constant GPULight* lights [[buffer(5)]],
+                                      constant uint& light_count [[buffer(6)]],
+                                      constant float3& ambient [[buffer(7)]],
+                                      constant float2& surface [[buffer(8)]],      // specular strength, shininess
+                                      constant float4x4& light_vp [[buffer(9)]],
+                                      constant int& shadow_light [[buffer(10)]],   // index of the shadowed light, -1 none
+                                      constant float2& tone [[buffer(11)]],         // tone mapping (0 none, 1 ACES, 2 neutral), exposure
+                                      constant float2& pbr [[buffer(12)]],          // metallic, roughness (Standard)
+                                      constant float4& fog_params [[buffer(13)]],   // mode (0 none, 1 linear, 2 exp2), near, far, density
+                                      constant float3& fog_color [[buffer(14)]],
+                                      constant uint& texture_repeat [[buffer(15)]],  // 1: UVs outside [0, 1] tile the texture
+                                      texture2d<float, access::sample> textureIn [[texture(0)]],
+                                      depth2d<float, access::sample> shadow_map [[texture(1)]])
 {
+    // Flat face normal from screen-space derivatives, for meshes without normals. Computed before any
+    // branch or discard: derivatives need every pixel of the 2x2 quad.
+    float3 face_normal = cross(dfdx(inColor.WorldPos), dfdy(inColor.WorldPos));
+
     if (any(inColor.WorldPos < clip_min) || any(inColor.WorldPos > clip_max)) {
         discard_fragment();
     }
 
+    float4 color = inColor.color;
     if (isTextured) {
         constexpr sampler colorSampler(address::clamp_to_edge, filter::linear);
-        float4 sample = textureIn.sample(colorSampler, inColor.textCoord);
-        return sample * inColor.color;
+        constexpr sampler repeatSampler(address::repeat, filter::linear, mip_filter::linear);
+        color *= texture_repeat ? textureIn.sample(repeatSampler, inColor.textCoord)
+                                : textureIn.sample(colorSampler, inColor.textCoord);
     }
-    return inColor.color;
+    // Fully transparent: drop it, so it doesn't write depth and hide whatever is drawn after it.
+    if (color.a <= 0.0) {
+        discard_fragment();
+    }
+
+    if (shading == 1 || shading == 2) {   // Lit (Blinn-Phong) or Standard (PBR)
+        float3 N = length_squared(inColor.normal) > 1e-12 ? inColor.normal : face_normal;
+        N = normalize(N);
+        float3 V = normalize(camera_pos - inColor.WorldPos);
+        if (dot(N, V) < 0.0) N = -N;   // two-sided: light whichever side faces the camera
+
+        // Standard: split the colour into a diffuse part and a specular reflectance at normal incidence (F0).
+        // Dielectrics reflect ~4% white; metals reflect their colour and have no diffuse.
+        float metallic = saturate(pbr.x);
+        float roughness = clamp(pbr.y, 0.0525, 1.0);          // three.js's floor: a perfect mirror aliases
+        float alpha = roughness * roughness;                    // perceptual -> GGX roughness
+        float3 diffuse_color = color.rgb * (1.0 - metallic);
+        float3 f0 = mix(float3(0.04), color.rgb, metallic);
+        float n_dot_v = max(dot(N, V), 1e-4);
+
+        float3 lit = shading == 2 ? ambient * (diffuse_color + env_brdf_approx(f0, roughness, n_dot_v))
+                                  : color.rgb * ambient;
+        float3 phong_specular = float3(0.0);
+        for (uint i = 0; i < light_count; i++) {
+            GPULight light = lights[i];
+            float3 radiance = light.color_intensity.rgb * light.color_intensity.a;
+            float3 L;
+            if (light.position_type.w < 0.5) {            // directional
+                L = -light.direction_range.xyz;
+            } else {                                      // point: falls to half strength at `range`
+                float3 to_light = light.position_type.xyz - inColor.WorldPos;
+                float d = length(to_light);
+                L = to_light / max(d, 1e-5);
+                float r = max(light.direction_range.w, 1e-5);
+                radiance /= 1.0 + (d / r) * (d / r);
+            }
+            float n_dot_l = max(dot(N, L), 0.0);
+            if (n_dot_l <= 0.0) continue;
+            float visibility = (int(i) == shadow_light) ? shadow_visibility(shadow_map, inColor.WorldPos, light_vp, n_dot_l) : 1.0;
+            float3 H = normalize(L + V);
+
+            if (shading == 1) {        // Lit: Lambert + Blinn-Phong
+                lit += color.rgb * radiance * n_dot_l * visibility;
+                phong_specular += radiance * visibility * surface.x * pow(max(dot(N, H), 0.0), surface.y);
+            } else {                   // Standard: Lambert + Cook-Torrance GGX
+                float3 F = F_Schlick(f0, saturate(dot(V, H)));
+                float3 specular = D_GGX(saturate(dot(N, H)), alpha) * V_SmithGGXCorrelated(n_dot_l, n_dot_v, alpha) * F;
+                // Our lights' intensity means "a white Lambert surface facing it shows that brightness", i.e.
+                // three.js's intensity / pi: so diffuse has no 1/pi, and the specular term carries a pi instead.
+                lit += radiance * n_dot_l * visibility * (diffuse_color + M_PI_F * specular);
+            }
+        }
+        color.rgb = lit + phong_specular;
+
+        color.rgb *= tone.y;                                   // exposure
+        if (uint(tone.x) == 1) {
+            color.rgb = aces_filmic(color.rgb / 0.6);          // three.js scales by 1/0.6 so exposure 1 matches its look
+        } else if (uint(tone.x) == 2) {
+            color.rgb = neutral_tone_map(color.rgb);
+        }
+    }
+
+    // Fog, last (after tone mapping, as three.js does): blend toward the fog colour with camera distance.
+    uint fog_mode = uint(fog_params.x);
+    if (fog_mode != 0) {
+        float dist = length(camera_pos - inColor.WorldPos);
+        float amount = fog_mode == 1 ? smoothstep(fog_params.y, fog_params.z, dist)
+                                     : 1.0 - exp(-(fog_params.w * dist) * (fog_params.w * dist));
+        color.rgb = mix(color.rgb, fog_color, saturate(amount));
+    }
+    return color;
 }
 

@@ -22,7 +22,8 @@ public:
     bool auto_fit = true;        // the first plot() fits the graph to its data
     int plot_count = 0;
 
-    GraphViewer(Bounds2D graph_space = {-10.0f, 10.0f, -10.0f, 10.0f}, Bounds2D world_space = {-1.0f, 1.0f, -1.0f, 1.0f}) {
+    GraphViewer(Bounds2D graph_space = {-10.0f, 10.0f, -10.0f, 10.0f}, Bounds2D world_space = {-1.0f, 1.0f, -1.0f,
+        1.0f}) {
         world = world_space;
         show_grid = false;   // a 2D graph: no infinite ground grid behind it
         float w_width = world_space.xmax - world_space.xmin;
@@ -104,7 +105,7 @@ public:
     // Override the draw method so we can steal the camera's zoom factor right before rendering!
     virtual void draw(id<MTLRenderCommandEncoder> cmdEncoder, 
                       id<MTLDevice> metalDevice, 
-                      id<MTLRenderPipelineState> __strong (&predefinedStates)[8], 
+                      id<MTLRenderPipelineState> __strong (&predefinedStates)[9], 
                       Camera3D* cam, 
                       int& active_state) override {
         
@@ -134,7 +135,8 @@ public:
         Viewer::draw(cmdEncoder, metalDevice, predefinedStates, cam, active_state);
     }
 
-    virtual bool handle_event(const ViewerEvent& event) override {
+    virtual bool handle_event(const ViewerEvent& renderer_event) override {
+        const ViewerEvent event = in_viewer_space(renderer_event);
         // Allow gizmo manipulation to take priority if active
 //        if (Viewer::handle_event(event)) return true;
 

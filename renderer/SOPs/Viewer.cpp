@@ -108,6 +108,26 @@ inline simd_float3 ray_plane_dir(simd_float3 ray_origin, simd_float3 ray_dir, si
 }
 
 
+// View-projection for a directional light: an orthographic box looking along `dir`, centred on `centre`,
+// reaching `radius` in every direction. Same conventions as Camera3D: column vectors (M * v), view-space
+// +z forward, x = cross(up, z), depth 0..1.
+inline simd_float4x4 light_view_proj(simd_float3 dir, simd_float3 centre, float radius) {
+    simd_float3 z = simd_normalize(dir);                                   // forward: the way the light travels
+    simd_float3 up = std::fabs(z.y) > 0.99f ? simd_make_float3(1, 0, 0) : simd_make_float3(0, 1, 0);
+    simd_float3 x = simd_normalize(simd_cross(up, z));
+    simd_float3 y = simd_cross(z, x);
+    simd_float3 eye = centre - z * radius;                                 // the box starts `radius` before the centre
+    simd_float4x4 view = simd_matrix_from_rows(simd_make_float4(x, -simd_dot(x, eye)),
+                                               simd_make_float4(y, -simd_dot(y, eye)),
+                                               simd_make_float4(z, -simd_dot(z, eye)),
+                                               simd_make_float4(0, 0, 0, 1));
+    simd_float4x4 proj = simd_matrix_from_rows(simd_make_float4(1 / radius, 0, 0, 0),        // x, y: [-r, r] -> [-1, 1]
+                                               simd_make_float4(0, 1 / radius, 0, 0),
+                                               simd_make_float4(0, 0, 1 / (2 * radius), 0),  // z: [0, 2r] -> [0, 1]
+                                               simd_make_float4(0, 0, 0, 1));
+    return simd_mul(proj, view);
+}
+
 enum class DragAxis {
     None, X, Y, Z, XY, YZ, ZX, Free
 };
@@ -146,6 +166,116 @@ public:
     // renderer takes these and keeps them alive until the frame's command buffer completes.
     // Otherwise a controller swapping in new data frees the old buffer while the GPU still reads it.
     std::vector<matrix> frame_refs;
+
+    // Lighting for Shading::Lit meshes. The default is a key light from above-left in front of the
+    // default camera, a dim fill from the right, and some ambient. Up to kMaxLights are used.
+    static constexpr size_t kMaxLights = 8;
+    std::vector<Light> lights = {
+        Light::directional(simd_make_float3(0.5f, -0.8f, 0.6f), 0.85f),    // key
+        Light::directional(simd_make_float3(-0.7f, -0.2f, 0.4f), 0.25f),   // fill
+    };
+    simd_float3 ambient = {0.15f, 0.15f, 0.15f};
+    ToneMapping tone_mapping = ToneMapping::None;   // opt-in, like three.js; existing lit scenes keep their look
+    float exposure = 1.0f;                          // multiplies lit colour before tone mapping
+    Fog fog;                                        // off by default: existing scenes don't change
+
+    // --- shadows (see prepare) ---
+    uint32_t shadow_map_size = 2048;
+    id<MTLTexture> shadow_map = nil;                 // depth as the shadow-casting light sees the casters
+    simd_float4x4 shadow_light_vp = matrix_identity_float4x4;
+    int32_t shadow_light = -1;                       // index in `lights` of the light with a shadow map; -1 none
+    id<MTLTexture> shadow_dummy_ = nil;              // 1x1, bound when there's no shadow map (the shader declares one)
+    id<MTLDepthStencilState> shadow_depth_state_ = nil;
+
+    void ensure_shadow_dummy(id<MTLDevice> device) {
+        if (shadow_dummy_) return;
+        MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                                                                     width:1 height:1 mipmapped:NO];
+        d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+        d.storageMode = MTLStorageModePrivate;
+        shadow_dummy_ = [device newTextureWithDescriptor:d];
+    }
+
+    // Renders the shadow map, before the main pass: the host calls it on the frame's command buffer before
+    // it opens its render pass. Only the first directional light with casts_shadows gets one, covering
+    // the bounding box of every visible mesh (pipeline 3) with material.casts_shadows.
+    virtual void prepare(id<MTLCommandBuffer> cmd, id<MTLDevice> device, id<MTLRenderPipelineState> shadow_state) {
+        ensure_shadow_dummy(device);
+        shadow_light = -1;
+        for (size_t i = 0; i < std::min(lights.size(), kMaxLights); i++) {
+            if (lights[i].casts_shadows && lights[i].type == Light::Type::Directional) { shadow_light = (int32_t)i; break; }
+        }
+        if (shadow_light < 0 || !shadow_state) return;
+
+        std::vector<GeoNodeImpl> casters;
+        for (const auto& root : nodes)
+            for (const auto& n : gather_nodes(root))
+                if (n->visible && !n->mesh.is_empty() && n->material.pipeline_state == 3 && n->material.casts_shadows)
+                    casters.push_back(n);
+        if (casters.empty()) { shadow_light = -1; return; }
+
+        // World-space box around every caster instance: its translation +- its largest scale * the mesh's extent.
+        simd_float3 lo = simd_make_float3(INFINITY, INFINITY, INFINITY), hi = -lo;
+        for (auto& n : casters) {
+            n->mesh.vert_position.eval();
+            n->world_transform.eval();
+            n->mesh.indices.eval();
+            for (matrix* m : {&n->mesh.vert_position, &n->world_transform, &n->mesh.indices}) {
+                if (m->total_size > 0 && !m->metalBuffer) m->buildMetalBuffer();
+                if (!m->refCount && !m->tape && m->buffer && !(m->flags & NON_OWNERSHIP_FLAG)) m->begin_refcount();
+                frame_refs.push_back(*m);
+            }
+            const matrix& p = n->mesh.vert_position;
+            const size_m stride = p.dims == 2 ? p.shape()[1] : 3, count = (size_m)(p.total_size / stride);
+            const float* v = static_cast<const float*>(p.buffer);
+            float extent = 0.0f;
+            for (size_m k = 0; k < count; k++)
+                extent = std::max(extent, simd_length(simd_make_float3(v[k * stride], v[k * stride + 1], v[k * stride + 2])));
+            for (size_m i = 0; i < n->world_transform.shape()[0]; i++) {
+                simd_float4x4 w = n->world_transform.SIMD_MAT((int)i);
+                float s = std::max({simd_length(w.columns[0].xyz), simd_length(w.columns[1].xyz), simd_length(w.columns[2].xyz)});
+                lo = simd_min(lo, w.columns[3].xyz - s * extent);
+                hi = simd_max(hi, w.columns[3].xyz + s * extent);
+            }
+        }
+        const simd_float3 centre = (lo + hi) * 0.5f;
+        const float radius = std::max(simd_length(hi - lo) * 0.5f, 1e-3f) * 1.05f;
+        shadow_light_vp = light_view_proj(lights[shadow_light].direction, centre, radius);
+
+        if (!shadow_map || shadow_map.width != shadow_map_size) {
+            MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                                                                         width:shadow_map_size height:shadow_map_size mipmapped:NO];
+            d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+            d.storageMode = MTLStorageModePrivate;
+            shadow_map = [device newTextureWithDescriptor:d];
+        }
+        if (!shadow_depth_state_) {
+            MTLDepthStencilDescriptor* ds = [MTLDepthStencilDescriptor new];
+            ds.depthCompareFunction = MTLCompareFunctionLess;
+            ds.depthWriteEnabled = YES;
+            shadow_depth_state_ = [device newDepthStencilStateWithDescriptor:ds];
+        }
+
+        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.depthAttachment.texture = shadow_map;
+        pass.depthAttachment.loadAction = MTLLoadActionClear;
+        pass.depthAttachment.clearDepth = 1.0;
+        pass.depthAttachment.storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> enc = [cmd renderCommandEncoderWithDescriptor:pass];
+        [enc setRenderPipelineState:shadow_state];
+        [enc setDepthStencilState:shadow_depth_state_];
+        [enc setCullMode:MTLCullModeNone];
+        [enc setDepthBias:2.0f slopeScale:2.0f clamp:0.01f];      // pushes stored depth back a little: less self-shadowing
+        [enc setVertexBytes:&shadow_light_vp length:sizeof(simd_float4x4) atIndex:2];
+        for (auto& n : casters) {
+            [enc setVertexBuffer:(id<MTLBuffer>)n->mesh.vert_position.metalBuffer offset:0 atIndex:0];
+            [enc setVertexBuffer:(id<MTLBuffer>)n->world_transform.metalBuffer offset:0 atIndex:1];
+            [enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:n->mesh.indices.total_size
+                             indexType:MTLIndexTypeUInt32 indexBuffer:(id<MTLBuffer>)n->mesh.indices.metalBuffer
+                     indexBufferOffset:0 instanceCount:n->world_transform.shape()[0]];
+        }
+        [enc endEncoding];
+    }
 
     virtual ~Viewer() = default;
 
@@ -192,10 +322,21 @@ public:
 
     virtual void draw(id<MTLRenderCommandEncoder> cmdEncoder, 
                       id<MTLDevice> metalDevice, 
-                      id<MTLRenderPipelineState> __strong (&predefinedStates)[8], 
+                      id<MTLRenderPipelineState> __strong (&predefinedStates)[9], 
                       Camera3D* cam, 
                       int& active_state) {
         current_pass_id +=1;
+
+        // This frame's lights, in the layout DAGNodeFragmentShader reads (one entry minimum: Metal wants the buffer).
+        GPULight gpu_lights[kMaxLights] = {};
+        uint32_t light_count = (uint32_t)std::min(lights.size(), kMaxLights);
+        for (uint32_t i = 0; i < light_count; i++) {
+            const Light& l = lights[i];
+            simd_float3 dir = simd_length(l.direction) > 0 ? simd_normalize(l.direction) : simd_make_float3(0, -1, 0);
+            gpu_lights[i].position_type = simd_make_float4(l.position, (float)(uint32_t)l.type);
+            gpu_lights[i].direction_range = simd_make_float4(dir, l.range);
+            gpu_lights[i].color_intensity = simd_make_float4(l.color, l.intensity);
+        }
         
         if (active_node) {
 //            transform_gizmo.node->local_transform.flags |= NON_OWNERSHIP_FLAG;
@@ -244,6 +385,8 @@ public:
                 if (node->material.colors.tape) node->material.colors.tape->invalidate_pass(current_pass_id);
                 if (node->mesh.uv_coords.tape) node->mesh.uv_coords.tape->invalidate_pass(current_pass_id);
                 if (node->mesh.indices.tape) node->mesh.indices.tape->invalidate_pass(current_pass_id);
+                if (node->mesh.normals.tape) node->mesh.normals.tape->invalidate_pass(current_pass_id);
+                if (node->mesh.glyphs.tape) node->mesh.glyphs.tape->invalidate_pass(current_pass_id);
             }
         };
         invalidate_nodes(scene_nodes);
@@ -264,6 +407,8 @@ public:
                 node->material.colors.eval();
                 node->mesh.uv_coords.eval();
                 node->mesh.indices.eval();
+                node->mesh.normals.eval();
+                node->mesh.glyphs.eval();
                 node->topology.edges.eval();
 
                 auto ensure_metal = [](matrix& mat) {
@@ -277,11 +422,13 @@ public:
                 ensure_metal(node->material.colors);
                 ensure_metal(node->mesh.uv_coords);
                 ensure_metal(node->mesh.indices);
+                ensure_metal(node->mesh.normals);
+                ensure_metal(node->mesh.glyphs);
                 ensure_metal(node->topology.edges);
 
                 for (matrix* m : {&node->mesh.vert_position, &node->local_transform, &node->world_transform,
                                   &node->material.colors, &node->mesh.uv_coords, &node->mesh.indices,
-                                  &node->topology.edges}) {
+                                  &node->mesh.normals, &node->mesh.glyphs, &node->topology.edges}) {
                     if (m->total_size == 0) continue;
                     // A plain owned buffer (no refcount, no tape, e.g. matrix{r, g, b, a}) would be deep-copied
                     // here, keeping a copy alive instead of the buffer the GPU reads. Make it refcounted first
@@ -326,7 +473,40 @@ public:
                     [cmdEncoder setVertexBytes:&local_instances length:sizeof(uint32_t) atIndex:10];
                 }
 
-                if (active_state == 4) {
+                if (active_state == 3) {   // mesh: normals (vertex 6, 7) and shading (fragment 3, 4)
+                    // No normals: bind the positions in their place (the shader must have a buffer there) and
+                    // say so; lit shading then uses flat face normals.
+                    uint32_t has_normals = node->mesh.normals.metalBuffer && node->mesh.normals.total_size == node->mesh.vert_position.total_size;
+                    id<MTLBuffer> normal_buffer = has_normals ? (id<MTLBuffer>)node->mesh.normals.metalBuffer
+                                                              : (id<MTLBuffer>)node->mesh.vert_position.metalBuffer;
+                    [cmdEncoder setVertexBuffer:normal_buffer offset:0 atIndex:6];
+                    [cmdEncoder setVertexBytes:&has_normals length:sizeof(uint32_t) atIndex:7];
+                    uint32_t shading = (uint32_t)node->material.shading;
+                    [cmdEncoder setFragmentBytes:&shading length:sizeof(uint32_t) atIndex:3];
+                    [cmdEncoder setFragmentBytes:&cam->position length:sizeof(simd_float3) atIndex:4];
+                    [cmdEncoder setFragmentBytes:gpu_lights length:sizeof(GPULight) * std::max(light_count, 1u) atIndex:5];
+                    [cmdEncoder setFragmentBytes:&light_count length:sizeof(uint32_t) atIndex:6];
+                    [cmdEncoder setFragmentBytes:&ambient length:sizeof(simd_float3) atIndex:7];
+                    simd_float2 surface = {node->material.specular, node->material.shininess};
+                    [cmdEncoder setFragmentBytes:&surface length:sizeof(simd_float2) atIndex:8];
+                    ensure_shadow_dummy(metalDevice);   // hosts that never call prepare() still bind something
+                    [cmdEncoder setFragmentTexture:(shadow_light >= 0 ? shadow_map : shadow_dummy_) atIndex:1];
+                    [cmdEncoder setFragmentBytes:&shadow_light_vp length:sizeof(simd_float4x4) atIndex:9];
+                    int32_t node_shadow_light = node->material.receives_shadows ? shadow_light : -1;
+                    [cmdEncoder setFragmentBytes:&node_shadow_light length:sizeof(int32_t) atIndex:10];
+                    simd_float2 tone = {(float)(uint32_t)(node->material.tone_mapped ? tone_mapping : ToneMapping::None), exposure};
+                    [cmdEncoder setFragmentBytes:&tone length:sizeof(simd_float2) atIndex:11];
+                    simd_float2 pbr = {node->material.metallic, node->material.roughness};
+                    [cmdEncoder setFragmentBytes:&pbr length:sizeof(simd_float2) atIndex:12];
+                    Fog f = node->material.fog ? fog : Fog{};
+                    simd_float4 fog_params = {(float)(uint32_t)f.mode, f.near, f.far, f.density};
+                    [cmdEncoder setFragmentBytes:&fog_params length:sizeof(simd_float4) atIndex:13];
+                    [cmdEncoder setFragmentBytes:&f.color length:sizeof(simd_float3) atIndex:14];
+                    uint32_t texture_repeat = node->material.texture_repeat;
+                    [cmdEncoder setFragmentBytes:&texture_repeat length:sizeof(uint32_t) atIndex:15];
+                }
+
+                if (active_state == 4 || active_state == 8) {   // thick lines: strip / round joins
                     [cmdEncoder setVertexBytes:&cam->position length:sizeof(simd_float3) atIndex:6];
                     [cmdEncoder setVertexBytes:&node->material.line_width length:sizeof(float) atIndex:7];
                     uint32_t total_points = node->mesh.vert_position.shape()[0];
@@ -344,9 +524,15 @@ public:
                     [cmdEncoder setVertexBytes:&node->material.line_width length:sizeof(float) atIndex:7];
                 }
 
-                if (active_state == 7) {   // text labels: glyph height (fraction of the viewport) + aspect
-                    simd_float2 label_params = {node->material.line_width, cam->getAspectRatio()};
+                if (active_state == 7) {   // text labels: the glyph records, drawn once per instance of the node
+                    if (node->mesh.glyphs.metalBuffer) {
+                        [cmdEncoder setVertexBuffer:(id<MTLBuffer>)node->mesh.glyphs.metalBuffer offset:0 atIndex:11];
+                    }
+                    // Glyph height (fraction of the viewport), aspect, glyphs per instance (LabelParams).
+                    struct { float size; float aspect; uint32_t glyph_count; } label_params = {
+                        node->material.line_width, cam->getAspectRatio(), (uint32_t)node->mesh.glyphs.shape()[0]};
                     [cmdEncoder setVertexBytes:&label_params length:sizeof(label_params) atIndex:7];
+                    instanceCount *= label_params.glyph_count;
                 }
 
                 bool isTextured = node->material.has_texture;
@@ -374,10 +560,16 @@ public:
                                    vertexStart: 0 
                                    vertexCount: num_edges * 6
                                  instanceCount: instanceCount];
-                } else if (active_state == 4) { // SOA Thick Line
+                } else if (active_state == 4) { // SOA Thick Line: one strip, 2 vertices per point
                     apply_bias(node->material.depth_bias);
                     uint32_t pointCount = node->mesh.vert_position.shape()[0];
-                    // A quad per segment, then a disc per point for the round joins (see vertex_line3d)
+                    [cmdEncoder drawPrimitives: MTLPrimitiveTypeTriangleStrip
+                                   vertexStart: 0 
+                                   vertexCount: pointCount * 2
+                                 instanceCount: instanceCount];
+                } else if (active_state == 8) { // Thick line with round joins: a quad per segment, then a disc per point (vertex_line3d_round)
+                    apply_bias(node->material.depth_bias);
+                    uint32_t pointCount = node->mesh.vert_position.shape()[0];
                     [cmdEncoder drawPrimitives: MTLPrimitiveTypeTriangle
                                    vertexStart: 0 
                                    vertexCount: pointCount * 12
@@ -446,10 +638,10 @@ private:
                      std::vector<GeoNodeImpl>& edge_nodes,
                      std::vector<GeoNodeImpl>& label_nodes) {
         for (const auto& node : flat_nodes) {
-            if (node->mesh.is_empty()) continue;
+            if (node->mesh.is_empty() || !node->visible) continue;
             
             uint32_t state = node->material.pipeline_state;
-            if (state == 4) {
+            if (state == 4 || state == 8) {   // thick lines: strip / round joins
                 line_nodes.push_back(node);
             } else if (state == 5) { // SOA Point Cloud
                 pc_nodes.push_back(node);
@@ -480,7 +672,32 @@ public:
         return p2 + d2 * (simd_dot(p1 - p2, n1) / simd_dot(d2, n1));
     }
 
-    virtual bool handle_event(const ViewerEvent& event) {
+    // The event as this viewer sees it. The renderer sends rays through its own camera over the
+    // whole view; a viewer with its own camera is drawn through that camera into its viewport, so
+    // the cursor (now and on the previous event) is moved into the viewport's own -1..1 range and
+    // the rays are rebuilt through the viewer's camera. Without a camera it's the event unchanged.
+    ViewerEvent in_viewer_space(const ViewerEvent& event) const {
+        if (!camera) return event;
+        // viewport: top-left origin fractions; normalized_pos: whole view, y up. Its centre in
+        // -1..1 is (2x + w - 1, 1 - 2y - h) and its half size is (w, h).
+        auto local = [&](simd_float2 p) {
+            return simd_make_float2((p.x - (2 * viewport.x + viewport.z - 1)) / viewport.z,
+                                    (p.y - (1 - 2 * viewport.y - viewport.w)) / viewport.w);
+        };
+        ViewerEvent e = event;
+        auto [ray_origin, ray_dir, pos] = ray_from_screen_space((local(event.normalized_pos) + 1) * 0.5f, simd_make_float2(1, 1), *camera);
+        auto [prev_ray_origin, prev_ray_dir, prev_pos] = ray_from_screen_space((local(event.prev_normalized_pos) + 1) * 0.5f, simd_make_float2(1, 1), *camera);
+        e.normalized_pos = pos;
+        e.prev_normalized_pos = prev_pos;
+        e.ray_origin = ray_origin;
+        e.ray_dir = ray_dir;
+        e.prev_ray_origin = prev_ray_origin;
+        e.prev_ray_dir = prev_ray_dir;
+        return e;
+    }
+
+    virtual bool handle_event(const ViewerEvent& renderer_event) {
+        const ViewerEvent event = in_viewer_space(renderer_event);
         auto all_nodes = get_all_nodes();
         
 
@@ -505,6 +722,11 @@ public:
                 }
                 
                 active_node = result.node;
+                while (active_node->select_parent) {
+                    GeoNodeImpl parent = active_node->parent.lock();
+                    if (!parent) break;
+                    active_node = parent;
+                }
                 std::cout << "Selected node: " << active_node->name << "\n";
                 break;
             }
@@ -583,9 +805,9 @@ public:
         HitResult best_hit = {false, MAXFLOAT, nullptr, {0,0,0}};
         
         for (int i = 0; i < test_nodes.size(); i++) {
-            if (!test_nodes[i]->draggable) continue;
+            if (!test_nodes[i]->draggable || !test_nodes[i]->visible) continue;
             if (test_nodes[i]->mesh.is_empty()) continue;
-            if (test_nodes[i]->material.pipeline_state == 4) continue;
+            if (test_nodes[i]->material.pipeline_state == 4 || test_nodes[i]->material.pipeline_state == 8) continue;
             matrix verts = test_nodes[i]->mesh.vert_position;
             matrix idx = test_nodes[i]->mesh.indices;
             verts = verts.pad(0, 1, -1, matrix::scalar(1.0f));
@@ -598,7 +820,7 @@ public:
             
             int num_instances = test_nodes[i]->world_transform.shape()[0];
             
-            if (test_nodes[i]->material.pipeline_state == 4) {
+            if (test_nodes[i]->material.pipeline_state == 4 || test_nodes[i]->material.pipeline_state == 8) {
                 float line_width = test_nodes[i]->material.line_width;
                 for (int inst = 0; inst < num_instances; inst++) {
                     simd_float4x4 transform = test_nodes[i]->world_transform.SIMD_MAT(inst);

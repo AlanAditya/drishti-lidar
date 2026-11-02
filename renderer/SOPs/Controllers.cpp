@@ -1,11 +1,18 @@
 #pragma once
 #include <string>
 #include <vector>
+#include <unordered_map>
 #include <simd/simd.h>
 #include "../matrix/matrix.h"
 #include "GeoNode.cpp"
 #include "MeshPrimitives.cpp"
+// Hidden from CLion's code analysis only (real compilers don't define these): CLion Nova can't parse
+// Objective-C and reads MDLTransform's `@property ... matrix;` as a global variable that shadows
+// the matrix class in every file that includes this one.
+#if !defined(__RESHARPER__) && !defined(__CLION_IDE__)
 #import <ModelIO/ModelIO.h>
+#import <MetalKit/MetalKit.h>
+#endif
 
 class PointCloudController {
 public:
@@ -239,6 +246,9 @@ private:
 // Bold, drawn once with CPURasteriser::drawTextCG, which MatrixH.mm includes before this file), and
 // every glyph of every label is one instance of a unit quad on pipeline 7 (DAGShaders.metal
 // vertex_label): one draw call for all labels. Each label sits on a translucent plate for contrast.
+// The glyphs are mesh data (mesh.glyphs); the node's transform is an ordinary transform, so a label
+// can be a child (add_child) and moves with its parent. Text keeps its size on screen whatever the
+// transform's scale: only the anchors are transformed.
 // Characters outside the atlas (lower case is upper-cased) are drawn as spaces.
 // update()/clear() can be called from any thread (swapped in on the main thread).
 class LabelController {
@@ -261,8 +271,16 @@ public:
         quad_.indices.begin_refcount();
     }
 
-    // One label per anchor (world position of the label's bottom centre), all the same colours.
+    // One label per anchor (in the node's space, the label's bottom centre), all the same colours.
     void update(const std::vector<simd_float3>& anchors, const std::vector<std::string>& texts,
+                simd_float4 text_rgba = {0.72f, 0.93f, 1.0f, 1.0f},
+                simd_float4 plate_rgba = {0.02f, 0.08f, 0.14f, 0.55f}) {
+        update(anchors, texts, std::vector<float>(), text_rgba, plate_rgba);
+    }
+
+    // The same, with each label moved `lines[i]` label heights up from the anchor (negative: down), so
+    // several labels can stack on one point and stay stacked at any zoom. Missing entries are 0.
+    void update(const std::vector<simd_float3>& anchors, const std::vector<std::string>& texts, const std::vector<float>& lines,
                 simd_float4 text_rgba = {0.72f, 0.93f, 1.0f, 1.0f},
                 simd_float4 plate_rgba = {0.02f, 0.08f, 0.14f, 0.55f}) {
         const Atlas& at = atlas();
@@ -272,20 +290,20 @@ public:
         if (count == 0) { clear(); return; }
 
         const float advance = at.glyph_aspect, pad = 0.2f, lift = 0.35f;
-        matrix inst = matrix::withShape({(size_m)count, 4, 4}, dtype::Float);
-        inst.begin_refcount();
-        size_t k = 0;
+        matrix glyphs = matrix::withShape({(size_m)count, 16}, dtype::Float);
+        glyphs.begin_refcount();
+        simd_float4* g = (simd_float4*)glyphs.buffer;   // the Glyph layout in DAGShaders.metal
         auto put = [&](simd_float3 a, float layer, simd_float4 rect, simd_float4 uv, simd_float4 rgba) {
-            simd_float4x4& m = inst.SIMD_MAT((int)k++);
-            m.columns[0] = simd_make_float4(a, layer);
-            m.columns[1] = rect;
-            m.columns[2] = uv;
-            m.columns[3] = rgba;
+            *g++ = simd_make_float4(a, layer);
+            *g++ = rect;
+            *g++ = uv;
+            *g++ = rgba;
         };
         for (size_t i = 0; i < n; ++i) {
             const std::string& s = texts[i];
             const float w = advance * s.size();
-            const float x0 = -0.5f * w, y0 = lift;
+            const float line_height = 1 + 2 * pad + 0.15f;   // plate plus a small gap
+            const float x0 = -0.5f * w, y0 = lift + (i < lines.size() ? lines[i] : 0.0f) * line_height;
             put(anchors[i], 0, simd_make_float4(x0 - pad, y0 - pad, w + 2 * pad, 1 + 2 * pad), at.uv(Atlas::kSolid), plate_rgba);
             for (size_t c = 0; c < s.size(); ++c) {
                 put(anchors[i], 1, simd_make_float4(x0 + c * advance, y0, advance, 1), at.uv(at.index(s[c])), text_rgba);
@@ -297,8 +315,8 @@ public:
         float sz = size;
         dispatch_async(dispatch_get_main_queue(), ^{
             nd->mesh = quad;
+            nd->mesh.glyphs = glyphs;
             nd->material.line_width = sz;
-            nd->set_local_transform(inst);
         });
     }
 
@@ -407,7 +425,7 @@ class TriangleController {
 public:
     GeoNodeImpl node;
 
-    TriangleController(std::string name, matrix anchor = matrix(0, dtype::Float)) {
+    TriangleController(std::string name, matrix anchor = matrix(0, 0, dtype::Float)) {
         node = GeoNode::create(std::move(name));
         node->mesh = MeshPrimitives::triangle(1.0f, 1.0f);
         if (anchor.total_size > 0) {
@@ -447,6 +465,8 @@ public:
             {v2.x, v2.y, v2.z},
             {v3.x, v3.y, v3.z}
         });
+        simd_float3 nrm = simd_normalize(simd_cross(v1 - v0, v3 - v0));   // the quad's new plane
+        node->mesh.normals = MeshPrimitives::constant_normals(4, nrm);
     }
 };
 
@@ -564,7 +584,7 @@ class CylinderController {
 public:
     GeoNodeImpl node;
 
-    CylinderController(std::string name, float radius = 1.0f, float length = 1.0f, int subdivisions = 32, matrix anchor = matrix(0, dtype::Float)) {
+    CylinderController(std::string name, float radius = 1.0f, float length = 1.0f, int subdivisions = 32, matrix anchor = matrix(0, 0, dtype::Float)) {
         node = GeoNode::create(std::move(name));
         node->mesh = MeshPrimitives::cylinder(radius, length, subdivisions);
         if (anchor.total_size > 0) {
@@ -577,7 +597,7 @@ class ConeController {
 public:
     GeoNodeImpl node;
 
-    ConeController(std::string name, float radius = 1.0f, float length = 1.0f, int subdivisions = 32, matrix anchor = matrix(0, dtype::Float)) {
+    ConeController(std::string name, float radius = 1.0f, float length = 1.0f, int subdivisions = 32, matrix anchor = matrix(0, 0, dtype::Float)) {
         node = GeoNode::create(std::move(name));
         node->mesh = MeshPrimitives::cone(radius, length, subdivisions);
         if (anchor.total_size > 0) {
@@ -585,33 +605,31 @@ public:
         }
     }
     
+    // Re-points the cone: base at the origin, tip at `dir`, base radius r. Rebuilds the mesh (fresh buffers,
+    // normals included) rather than writing into buffers an in-flight frame might be reading.
     void update(simd_float3 dir, float r) {
-        int n = node->mesh.vert_position.shape()[0] - 2;
+        const int n = (int)(node->mesh.vert_position.shape()[0] - 2) / 3;   // MeshPrimitives::cone has 3n + 2 vertices
+        const float len = simd_length(dir);
+        if (n < 3 || len <= 0.0f) return;
+        simd_float3 axis = dir / len;
         simd_float3 up = {0.0f, 1.0f, 0.0f};
         // Avoid singularity if dir is parallel to up
-        if (std::abs(simd_normalize(dir).y) > 0.99f) {
+        if (std::abs(axis.y) > 0.99f) {
             up = {1.0f, 0.0f, 0.0f};
         }
-        simd_float3 right = simd_normalize(simd_cross(up, dir));
-        up = -simd_normalize(simd_cross(right, dir));
-        
-        node->mesh.vert_position.at<float>(0, 0) = 0.0f;
-        node->mesh.vert_position.at<float>(0, 1) = 0.0f;
-        node->mesh.vert_position.at<float>(0, 2) = 0.0f;
-        
-        node->mesh.vert_position.at<float>(n + 1, 0) = dir.x;
-        node->mesh.vert_position.at<float>(n + 1, 1) = dir.y;
-        node->mesh.vert_position.at<float>(n + 1, 2) = dir.z;
-        
-        float theta = 0;
-        float stride = 2 * M_PI / n;
-        for (int i = 0; i < n; i++) {
-            simd_float3 resultant = r * right * cos(theta) + r * up * sin(theta);
-            node->mesh.vert_position.at<float>(1 + i, 0) = resultant.x;
-            node->mesh.vert_position.at<float>(1 + i, 1) = resultant.y;
-            node->mesh.vert_position.at<float>(1 + i, 2) = resultant.z;
-            theta += stride;
+        simd_float3 right = simd_normalize(simd_cross(up, axis));
+        up = -simd_normalize(simd_cross(right, axis));
+
+        // Build it along +y, then rotate +x -> right, +y -> axis, +z -> up (positions and normals alike).
+        Mesh m = MeshPrimitives::cone(r, len, n);
+        for (matrix* a : {&m.vert_position, &m.normals}) {
+            float* v = static_cast<float*>(a->buffer);
+            for (int i = 0; i < 3 * n + 2; i++) {
+                simd_float3 q = right * v[3 * i] + axis * v[3 * i + 1] + up * v[3 * i + 2];
+                v[3 * i] = q.x, v[3 * i + 1] = q.y, v[3 * i + 2] = q.z;
+            }
         }
+        node->mesh = m;
     }
 };
 
@@ -683,10 +701,20 @@ class LineController {
 public:
     GeoNodeImpl node;
     float line_width = 0.0025f;
+    bool round_joins = false;   // pipeline 8 (round joins and caps, 12 vertices per point) instead of 4 (strip, 2)
 
     LineController(std::string name = "Line3D", float width = 0.0025f) : line_width(width) {
         node = GeoNode::create(std::move(name));
         node->material.pipeline_state = 4;
+    }
+    // Round joins and caps (pipeline 8) or the cheap mitered strip (pipeline 4, sharp turns spike).
+    // Applied on the main queue like update(), and kept by later updates.
+    void set_round_joins(bool on) {
+        round_joins = on;
+        GeoNodeImpl node_to_update = node;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            node_to_update->material.pipeline_state = on ? 8 : 4;
+        });
     }
 // legacy bout to be gone
 //    void update(const matrix& points, matrix cam_forward_matrix) {
@@ -746,14 +774,16 @@ public:
         
         GeoNodeImpl node_to_update = node;
         float current_line_width = line_width;
+        uint32_t state = round_joins ? 8 : 4;
         
         dispatch_async(dispatch_get_main_queue(), ^{
             node_to_update->mesh.vert_position = points; // Send raw points directly!
-            node_to_update->mesh.indices = matrix(0, 0, dtype::UInt32); // Clear indices, handled by vertex shader triangle strip
-            node_to_update->material.pipeline_state = 4; // Our new Vertex Shader path
+            node_to_update->mesh.indices = matrix(0, 0, dtype::UInt32); // Clear indices, the vertex shader builds the line
+            node_to_update->material.pipeline_state = state; // 4: strip, 8: round joins
             node_to_update->material.line_width = current_line_width;
         });
     }
+    
     
     void update(matrix x, matrix y) {
         if (x.type != dtype::Float) x = x.astype(dtype::Float);
@@ -762,11 +792,12 @@ public:
         
         GeoNodeImpl node_to_update = node;
         float current_line_width = line_width;
+        uint32_t state = round_joins ? 8 : 4;
         
         dispatch_async(dispatch_get_main_queue(), ^{
             node_to_update->mesh.vert_position = points; // Send raw points directly!
-            node_to_update->mesh.indices = matrix(0, 0, dtype::UInt32); // Clear indices, handled by vertex shader triangle strip
-            node_to_update->material.pipeline_state = 4; // Our new Vertex Shader path
+            node_to_update->mesh.indices = matrix(0, 0, dtype::UInt32); // Clear indices, the vertex shader builds the line
+            node_to_update->material.pipeline_state = state; // 4: strip, 8: round joins
             node_to_update->material.line_width = current_line_width;
         });
     }
@@ -1110,13 +1141,16 @@ public:
 //};
 
 
+// Loads a model file (.obj, .usdz, .usd, ...) through ModelIO. `node` is an empty root; the model hangs
+// under it as one child per material (each child's Material holds one colour/texture), with positions and
+// normals baked into the root's space. Tapping any part selects the root, so the model moves as one.
 class ModelController {
 public:
     GeoNodeImpl node; // Root node for the model
 
     // Pure C++ interface. We will handle the Objective-C++ NSURL conversion internally.
-    ModelController(std::string name, std::string filepath, bool use_matrix_strides = false, matrix anchor = matrix(0, dtype::Float)) {
-        node = GeoNode::create(std::move(name));
+    ModelController(std::string name, std::string filepath, bool use_matrix_strides = false, matrix anchor = matrix(0, 0, dtype::Float)) {
+        node = GeoNode::create(name);
         NSString* path = [NSString stringWithUTF8String:filepath.c_str()];
         NSURL* url = [NSURL fileURLWithPath:path];
         
@@ -1128,6 +1162,7 @@ public:
             printf("Failed to load 3D model at path: %s\n", filepath.c_str());
             return;
         }
+        [asset loadTextures];   // material properties that name an image become MDLTextures
         
         MDLVertexDescriptor* model_vertex_desc = [[MDLVertexDescriptor alloc] init];
         if (use_matrix_strides) {
@@ -1155,95 +1190,216 @@ public:
             
         }
         
-        MDLMesh* mesh = NULL;
-        for (int i = 0; i < asset.count; i++) {
-            MDLObject* obj = [asset objectAtIndex:i];
-            if ([obj isKindOfClass:[MDLMesh class]]) {
-                mesh = (MDLMesh*)obj;
-                break;
-            }
-        }
-        if (!mesh) {
+        // USD/USDZ (and most scene formats) nest meshes under transform nodes, so the asset's
+        // top-level objects are usually plain MDLObjects. childObjectsOfClass: walks the whole
+        // hierarchy; .obj files still come back as their top-level meshes.
+        NSArray<MDLObject*>* meshes = [asset childObjectsOfClass:[MDLMesh class]];
+        if (meshes.count == 0) {
             printf("No MDLMesh found in the asset!\n");
             return;
         }
-        
-        // Compute normals if the obj file doesn't have them (e.g. Stanford Bunny)
-        [mesh addNormalsWithAttributeNamed:MDLVertexAttributeNormal creaseThreshold:0.85];
-        [mesh setVertexDescriptor:model_vertex_desc];
-        NSUInteger num_verts = mesh.vertexCount;
-        
-        matrix root_positions(0, dtype::Float);
-        matrix root_uvs(0, dtype::Float);
-        matrix root_normals(0, dtype::Float);
-        
-        if (use_matrix_strides) {
-            id<MDLMeshBuffer> interleavedBuffer = mesh.vertexBuffers[0];
-            void *interleavedData = [interleavedBuffer.map bytes];
-            matrix raw_block = matrix::zeros({(size_m)num_verts, 8}, dtype::Float);
-            raw_block.eval(); // zeros() is now lazy; force the buffer to materialize before writing into it directly
-            memcpy(raw_block.buffer, interleavedData, num_verts * 8 * sizeof(float));
-            root_positions = raw_block[R(), R(0, 3)].astype(dtype::Float, true);
-            root_uvs = raw_block[R(), R(3, 5)].astype(dtype::Float, true);
-        } else {
-            // === OPTION A (SoA): Let ModelIO do the separation for us ===
-            id<MDLMeshBuffer> posBuffer = mesh.vertexBuffers[0];
-            id<MDLMeshBuffer> uvBuffer  = mesh.vertexBuffers[1];
-            id<MDLMeshBuffer> normalBuffer  = mesh.vertexBuffers[2];
-            
-            void *posData = [posBuffer.map bytes];
-            void *uvData  = [uvBuffer.map bytes];
-            void *normalData  = [normalBuffer.map bytes];
-            // Allocate matrix tensors and copy the separated contiguous memory in
-            root_positions = matrix::zeros({(size_m)num_verts, 3}, dtype::Float);
-            root_positions.eval(); // zeros() is now lazy; force the buffer to materialize before writing into it directly
-            memcpy(root_positions.buffer, posData, num_verts * 3 * sizeof(float));
 
-            root_uvs = matrix::zeros({(size_m)num_verts, 2}, dtype::Float);
-            root_uvs.eval();
-            memcpy(root_uvs.buffer, uvData, num_verts * 2 * sizeof(float));
+        // One part per material (by name: the same material on many meshes is one part). Each part
+        // gathers the vertices its triangles use, so parts don't carry each other's vertices.
+        struct Part {
+            MDLMaterial* material = nil;
+            std::vector<float> positions, uvs, normals;
+            std::vector<uint32_t> indices;
+        };
+        std::vector<Part> parts;
+        std::unordered_map<std::string, size_t> part_of_material;
 
-            root_normals = matrix::zeros({(size_m)num_verts, 3}, dtype::Float);
-            root_normals.eval();
-            memcpy(root_normals.buffer, normalData, num_verts * 3 * sizeof(float));
-        }
-        
-        // TODO: Implement ModelIO parsing here!
-        node->mesh.vert_position = root_positions;
-        node->mesh.uv_coords = root_uvs;
-        if (mesh.submeshes.count > 0) {
-            MDLSubmesh *firstSubmesh = mesh.submeshes.firstObject;
-            id<MDLMeshBuffer> indexBuffer = firstSubmesh.indexBuffer;
-            void *indexData = [indexBuffer.map bytes];
-            NSUInteger num_indices = firstSubmesh.indexCount;
-            
-            matrix root_indices = matrix::zeros({(size_m)num_indices}, dtype::UInt32);
-            root_indices.eval(); // zeros() is now lazy; force the buffer to materialize before writing into it directly
+        for (MDLObject* obj in meshes) {
+            MDLMesh* mesh = (MDLMesh*)obj;
+            // Compute normals if the file doesn't have them (e.g. Stanford Bunny)
+            [mesh addNormalsWithAttributeNamed:MDLVertexAttributeNormal creaseThreshold:0.85];
+            [mesh setVertexDescriptor:model_vertex_desc];
+            NSUInteger num_verts = mesh.vertexCount;
+            if (num_verts == 0) continue;
 
-            // ModelIO can output 16-bit or 32-bit indices. Your matrix needs 32-bit.
-            if (firstSubmesh.indexType == MDLIndexBitDepthUInt16) {
-                uint16_t *indices16 = (uint16_t *)indexData;
-                uint32_t *indices32 = (uint32_t *)root_indices.buffer;
-                for (NSUInteger i = 0; i < num_indices; i++) {
-                    indices32[i] = (uint32_t)indices16[i];
+            // Per attribute: base pointer and stride in floats
+            const float *pos_data, *uv_data, *normal_data;
+            size_t pos_stride, uv_stride, normal_stride;
+            if (use_matrix_strides) {
+                // Option B (AoS): one interleaved buffer, [pos(3) uv(2) normal(3)]
+                const float* interleaved = (const float*)[mesh.vertexBuffers[0].map bytes];
+                pos_data = interleaved;     pos_stride = 8;
+                uv_data = interleaved + 3;  uv_stride = 8;
+                normal_data = interleaved + 5; normal_stride = 8;
+            } else {
+                // Option A (SoA): ModelIO did the separation for us
+                pos_data = (const float*)[mesh.vertexBuffers[0].map bytes];    pos_stride = 3;
+                uv_data = (const float*)[mesh.vertexBuffers[1].map bytes];     uv_stride = 2;
+                normal_data = (const float*)[mesh.vertexBuffers[2].map bytes]; normal_stride = 3;
+            }
+
+            simd_float4x4 world = [MDLTransform globalTransformWithObject:mesh atTime:0];
+            simd_float3x3 world3 = simd_matrix(world.columns[0].xyz, world.columns[1].xyz, world.columns[2].xyz);
+            simd_float3x3 normal_mat = simd_transpose(simd_inverse(world3));
+
+            // This mesh's vertex -> index in a part, per part it feeds (-1: not copied there yet)
+            std::unordered_map<size_t, std::vector<int64_t>> remaps;
+
+            for (MDLSubmesh* submesh in mesh.submeshes) {
+                if (submesh.geometryType != MDLGeometryTypeTriangles) continue;
+                std::string key = submesh.material.name ? submesh.material.name.UTF8String : "";
+                auto found = part_of_material.find(key);
+                size_t p = found != part_of_material.end() ? found->second : parts.size();
+                if (p == parts.size()) {
+                    part_of_material[key] = p;
+                    parts.push_back(Part{submesh.material});
                 }
-            } else if (firstSubmesh.indexType == MDLIndexBitDepthUInt32) {
-                memcpy(root_indices.buffer, indexData, num_indices * sizeof(uint32_t));
-            }
-            
-            node->mesh.indices = root_indices;
-            
-            // Pad [N, 3] normals to [N, 4] so they match the float4 color expectation in the shader
-            node->material.colors = root_normals.pad(0, 1, -1, matrix::scalar(1.0f));
-            // Explicitly build the metal buffer so it's ready for the Viewer
-            if (num_indices > 10) {
-                node->mesh.indices.buildMetalBuffer();
+                Part& part = parts[p];
+                std::vector<int64_t>& remap = remaps[p];
+                if (remap.empty()) remap.assign(num_verts, -1);
+
+                const void* index_data = [submesh.indexBuffer.map bytes];
+                NSUInteger num_indices = submesh.indexCount;
+                // ModelIO can output 8, 16 or 32-bit indices. The matrix needs 32-bit.
+                for (NSUInteger i = 0; i < num_indices; i++) {
+                    uint32_t v;
+                    switch (submesh.indexType) {
+                        case MDLIndexBitDepthUInt8:  v = ((const uint8_t*)index_data)[i]; break;
+                        case MDLIndexBitDepthUInt16: v = ((const uint16_t*)index_data)[i]; break;
+                        default:                     v = ((const uint32_t*)index_data)[i]; break;
+                    }
+                    if (remap[v] < 0) {
+                        remap[v] = (int64_t)(part.positions.size() / 3);
+                        const float* pos = pos_data + v * pos_stride;
+                        const float* uv = uv_data + v * uv_stride;
+                        const float* n = normal_data + v * normal_stride;
+                        simd_float4 wp = simd_mul(world, simd_make_float4(pos[0], pos[1], pos[2], 1.0f));
+                        simd_float3 wn = simd_normalize(simd_mul(normal_mat, simd_make_float3(n[0], n[1], n[2])));
+                        part.positions.insert(part.positions.end(), {wp.x, wp.y, wp.z});
+                        part.uvs.insert(part.uvs.end(), {uv[0], uv[1]});
+                        part.normals.insert(part.normals.end(), {wn.x, wn.y, wn.z});
+                    }
+                    part.indices.push_back((uint32_t)remap[v]);
+                }
             }
         }
+
+        if (parts.empty()) {
+            printf("The asset's meshes have no triangles!\n");
+            return;
+        }
+
+        // Opaque parts first: the Viewer draws in tree order and blends, so see-through parts (glass)
+        // must come after whatever they show.
+        std::vector<GeoNodeImpl> opaque, transparent;
+        size_t total_verts = 0, total_tris = 0;
+        for (Part& part : parts) {
+            size_m num_verts = (size_m)(part.positions.size() / 3);
+            if (num_verts == 0) continue;
+            total_verts += num_verts;
+            total_tris += part.indices.size() / 3;
+
+            NSString* material_name = part.material.name ?: @"default";
+            GeoNodeImpl child = GeoNode::create(name + "/" + material_name.UTF8String);
+            child->select_parent = true;
+
+            matrix positions = matrix::zeros({num_verts, 3}, dtype::Float);
+            positions.eval(); // zeros() is now lazy; force the buffer to materialize before writing into it directly
+            memcpy(positions.buffer, part.positions.data(), part.positions.size() * sizeof(float));
+            matrix uvs = matrix::zeros({num_verts, 2}, dtype::Float);
+            uvs.eval();
+            memcpy(uvs.buffer, part.uvs.data(), part.uvs.size() * sizeof(float));
+            matrix normals = matrix::zeros({num_verts, 3}, dtype::Float);
+            normals.eval();
+            memcpy(normals.buffer, part.normals.data(), part.normals.size() * sizeof(float));
+            matrix indices = matrix::zeros({(size_m)part.indices.size()}, dtype::UInt32);
+            indices.eval();
+            memcpy(indices.buffer, part.indices.data(), part.indices.size() * sizeof(uint32_t));
+
+            child->mesh.vert_position = positions;
+            child->mesh.uv_coords = uvs;
+            child->mesh.normals = normals;
+            child->mesh.indices = indices;
+            // Explicitly build the metal buffer so it's ready for the Viewer
+            if (part.indices.size() > 10) {
+                child->mesh.indices.buildMetalBuffer();
+            }
+
+            bool is_opaque = apply_material(child->material, part.material);
+            (is_opaque ? opaque : transparent).push_back(child);
+        }
+        for (auto& child : opaque) node->add_child(child);
+        for (auto& child : transparent) node->add_child(child);
+        printf("ModelController: %lu meshes, %zu parts, %zu vertices, %zu triangles\n",
+               (unsigned long)meshes.count, opaque.size() + transparent.size(), total_verts, total_tris);
         
         if (anchor.total_size > 0) {
             // If the mesh vertices are bound to the root node (e.g. flattened), apply anchor here
             // Note: If we use child GeoNodes for submeshes, we might apply the anchor to the root's local_transform instead.
         }
+    }
+
+private:
+    // ModelIO's physically based material -> ours: base colour (or texture), opacity, metallic, roughness.
+    // Files without materials (.obj without .mtl) keep a light grey. Returns whether the part is opaque.
+    static bool apply_material(Material& out, MDLMaterial* material) {
+        out.shading = Shading::Standard;
+        simd_float4 color = {0.8f, 0.8f, 0.8f, 1.0f};
+        out.metallic = 0.0f;
+        out.roughness = 0.5f;
+
+        if (material) {
+            MDLMaterialProperty* base = [material propertyWithSemantic:MDLMaterialSemanticBaseColor];
+            if (base.type == MDLMaterialPropertyTypeTexture && base.textureSamplerValue.texture) {
+                id<MTLTexture> texture = load_texture(base.textureSamplerValue.texture);
+                if (texture) {
+                    color = {1.0f, 1.0f, 1.0f, 1.0f};   // the shader multiplies the texture by this
+                    out.texture = texture;
+                    out.has_texture = true;
+                    out.texture_repeat = true;
+                }
+            } else if (base) {
+                simd_float3 rgb = property_color(base);
+                color = {rgb.x, rgb.y, rgb.z, 1.0f};
+            }
+
+            MDLMaterialProperty* metallic = [material propertyWithSemantic:MDLMaterialSemanticMetallic];
+            if (metallic.type == MDLMaterialPropertyTypeFloat) out.metallic = metallic.floatValue;
+            MDLMaterialProperty* roughness = [material propertyWithSemantic:MDLMaterialSemanticRoughness];
+            if (roughness.type == MDLMaterialPropertyTypeFloat) out.roughness = roughness.floatValue;
+            MDLMaterialProperty* opacity = [material propertyWithSemantic:MDLMaterialSemanticOpacity];
+            if (opacity.type == MDLMaterialPropertyTypeFloat) color.w = opacity.floatValue;
+        }
+
+        out.colors = matrix::of<float>({color.x, color.y, color.z, color.w}).reshape(1, 4);
+        out.casts_shadows = color.w >= 1.0f;   // glass shouldn't black out what's behind it in the shadow map
+        return color.w >= 1.0f;
+    }
+
+    static simd_float3 property_color(MDLMaterialProperty* p) {
+        switch (p.type) {
+            case MDLMaterialPropertyTypeFloat:  return simd_make_float3(p.floatValue);
+            case MDLMaterialPropertyTypeFloat3: return p.float3Value;
+            case MDLMaterialPropertyTypeFloat4: return p.float4Value.xyz;
+            case MDLMaterialPropertyTypeColor: {
+                CGColorRef c = p.color;
+                const CGFloat* k = CGColorGetComponents(c);
+                return CGColorGetNumberOfComponents(c) >= 3 ? simd_make_float3((float)k[0], (float)k[1], (float)k[2])
+                                                            : simd_make_float3((float)k[0]);
+            }
+            default: return simd_make_float3(0.8f);
+        }
+    }
+
+    // Colour textures are sRGB-encoded: loading them as sRGB lets the sampler return linear values,
+    // like the material's plain colours. Mipmaps keep large textures from shimmering at a distance.
+    static id<MTLTexture> load_texture(MDLTexture* texture) {
+        MTKTextureLoader* loader = [[MTKTextureLoader alloc] initWithDevice:GlobalGPUManager.metalDevice];
+        NSDictionary* options = @{
+            MTKTextureLoaderOptionSRGB: @YES,
+            MTKTextureLoaderOptionGenerateMipmaps: @YES,
+            MTKTextureLoaderOptionOrigin: MTKTextureLoaderOriginBottomLeft,
+            MTKTextureLoaderOptionTextureUsage: @(MTLTextureUsageShaderRead),
+            MTKTextureLoaderOptionTextureStorageMode: @(MTLStorageModePrivate),
+        };
+        NSError* error = nil;
+        id<MTLTexture> result = [loader newTextureWithMDLTexture:texture options:options error:&error];
+        if (!result) NSLog(@"ModelController: texture %@ failed to load: %@", texture.name, error);
+        return result;
     }
 };
