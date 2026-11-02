@@ -1,7 +1,7 @@
 #pragma once
 #include "Viewer.cpp"
 #include "Controllers.cpp"
-#include "../matrix/matrix.h"
+#include "../../matrix/matrix.h"
 @import Utils;
 
 struct Bounds2D {
@@ -135,8 +135,8 @@ public:
         Viewer::draw(cmdEncoder, metalDevice, predefinedStates, cam, active_state);
     }
 
-    virtual bool handle_event(const ViewerEvent& renderer_event) override {
-        const ViewerEvent event = in_viewer_space(renderer_event);
+    virtual bool handle_event(const DrishtiViewerEvent& renderer_event) override {
+        const DrishtiViewerEvent event = in_viewer_space(renderer_event);
         // Allow gizmo manipulation to take priority if active
 //        if (Viewer::handle_event(event)) return true;
 
@@ -146,7 +146,7 @@ public:
         graph_frame->draggable = false;
         if (!hit.hit) return false;
 
-        if (event.type == MouseEvent::Drag || event.type == MouseEvent::Scroll) {
+        if (event.type == DrishtiMouseEvent::Drag || event.type == DrishtiMouseEvent::Scroll) {
             // Find plane geometry in world space
             simd_float4x4 world_mat = graph_frame->world_transform.SIMD_MAT(0);
             simd_float3 normal = world_mat.columns[2].xyz; // Z axis of the frame
@@ -163,7 +163,7 @@ public:
             graph_node->local_transform.tape->version = ++global_epoch;
             return true;
         }
-        else if (event.type == MouseEvent::Zoom) {
+        else if (event.type == DrishtiMouseEvent::Zoom) {
             simd_float4x4 world_mat = graph_frame->world_transform.SIMD_MAT(0);
             simd_float3 normal = world_mat.columns[2].xyz;
             simd_float3 origin = world_mat.columns[3].xyz;

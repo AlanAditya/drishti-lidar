@@ -3,7 +3,7 @@
 #include <vector>
 #include <unordered_map>
 #include <simd/simd.h>
-#include "../matrix/matrix.h"
+#include "../../matrix/matrix.h"
 #include "GeoNode.cpp"
 #include "MeshPrimitives.cpp"
 // Hidden from CLion's code analysis only (real compilers don't define these): CLion Nova can't parse

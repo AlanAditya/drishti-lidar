@@ -1,6 +1,6 @@
 #pragma once
 #include "GraphViewer.cpp"
-#include "../matrix/matrix.h"
+#include "../../matrix/matrix.h"
 #include <algorithm>
 #include <optional>
 

@@ -2,10 +2,11 @@
 #include <vector>
 #include <simd/simd.h>
 #include "GeoNode.cpp"
-#include "./../matrix/primitives.cpp"
-#include "./../Mods/Utils.h"
-#include "./../matrix/matrix.h"
+#include "../../matrix/primitives.cpp"
+#include "../../matrix/Mods/Utils.h"
+#include "../../matrix/matrix.h"
 #include "Controllers.cpp"
+#include "../events.h"
 
 // Forward declarations to make code compile if necessary (conceptual)
 // struct RenderBucketJob { Mesh mesh; Material material; matrix instance_buffer; uint32_t instance_count; };
@@ -676,7 +677,7 @@ public:
     // whole view; a viewer with its own camera is drawn through that camera into its viewport, so
     // the cursor (now and on the previous event) is moved into the viewport's own -1..1 range and
     // the rays are rebuilt through the viewer's camera. Without a camera it's the event unchanged.
-    ViewerEvent in_viewer_space(const ViewerEvent& event) const {
+    DrishtiViewerEvent in_viewer_space(const DrishtiViewerEvent& event) const {
         if (!camera) return event;
         // viewport: top-left origin fractions; normalized_pos: whole view, y up. Its centre in
         // -1..1 is (2x + w - 1, 1 - 2y - h) and its half size is (w, h).
@@ -684,9 +685,9 @@ public:
             return simd_make_float2((p.x - (2 * viewport.x + viewport.z - 1)) / viewport.z,
                                     (p.y - (1 - 2 * viewport.y - viewport.w)) / viewport.w);
         };
-        ViewerEvent e = event;
-        auto [ray_origin, ray_dir, pos] = ray_from_screen_space((local(event.normalized_pos) + 1) * 0.5f, simd_make_float2(1, 1), *camera);
-        auto [prev_ray_origin, prev_ray_dir, prev_pos] = ray_from_screen_space((local(event.prev_normalized_pos) + 1) * 0.5f, simd_make_float2(1, 1), *camera);
+        DrishtiViewerEvent e = event;
+        auto [ray_origin, ray_dir, pos] = drishti_ray_from_screen_space((local(event.normalized_pos) + 1) * 0.5f, simd_make_float2(1, 1), *camera);
+        auto [prev_ray_origin, prev_ray_dir, prev_pos] = drishti_ray_from_screen_space((local(event.prev_normalized_pos) + 1) * 0.5f, simd_make_float2(1, 1), *camera);
         e.normalized_pos = pos;
         e.prev_normalized_pos = prev_pos;
         e.ray_origin = ray_origin;
@@ -696,13 +697,13 @@ public:
         return e;
     }
 
-    virtual bool handle_event(const ViewerEvent& renderer_event) {
-        const ViewerEvent event = in_viewer_space(renderer_event);
+    virtual bool handle_event(const DrishtiViewerEvent& renderer_event) {
+        const DrishtiViewerEvent event = in_viewer_space(renderer_event);
         auto all_nodes = get_all_nodes();
         
 
         switch (event.type) {
-            case MouseEvent::Tap: {
+            case DrishtiMouseEvent::Tap: {
                 HitResult result = ray_hit_closest(event.ray_origin, event.ray_dir, all_nodes);
                 std::cout << "Tap" << std::endl;
                 std::vector<GeoNodeImpl> gizmo_nodes;
@@ -730,11 +731,11 @@ public:
                 std::cout << "Selected node: " << active_node->name << "\n";
                 break;
             }
-            case MouseEvent::Hover:
+            case DrishtiMouseEvent::Hover:
                 current_drag_axis = DragAxis::None;
                 break;
                 
-            case MouseEvent::Drag: {
+            case DrishtiMouseEvent::Drag: {
                 if (!active_node) {
                     return false;
                     break;
@@ -793,9 +794,9 @@ public:
                 active_node->local_transform.tape->version = ++global_epoch;   // set_local_transform keeps a tape
                 break;
             }
-            case MouseEvent::Zoom:
+            case DrishtiMouseEvent::Zoom:
                 return false;
-            case MouseEvent::Scroll:
+            case DrishtiMouseEvent::Scroll:
                 return false;
         }
         return true;

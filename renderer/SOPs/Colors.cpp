@@ -1,5 +1,5 @@
 #pragma once
-#include "../matrix/matrix.h"
+#include "../../matrix/matrix.h"
 #include <simd/simd.h>
 #include <algorithm>
 #include <cmath>
